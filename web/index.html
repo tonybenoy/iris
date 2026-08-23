@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Iris</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <span class="brandname">Iris</span>
+  </div>
+  <form class="searchwrap" id="searchform" role="search">
+    <input id="q" type="search" autocomplete="off" spellcheck="false"
+           placeholder="mountains &middot; person:Sarah last summer &middot; tag:sunset"
+           aria-label="Search photos">
+  </form>
+  <nav class="tabs">
+    <button data-view="grid" class="on">Photos</button>
+    <button data-view="people">People</button>
+    <button data-view="places">Places</button>
+    <button data-view="dupes">Duplicates</button>
+    <button data-view="library">Library</button>
+  </nav>
+</header>
+
+<main>
+  <section id="grid-view">
+    <div class="gridbar">
+      <div class="resultline" id="resultline"></div>
+      <div class="controls">
+        <label>Group
+          <select id="groupby" aria-label="Group photos by">
+            <option value="month">Month</option>
+            <option value="day">Day</option>
+            <option value="year">Year</option>
+            <option value="folder">Folder</option>
+            <option value="none">Nothing</option>
+          </select>
+        </label>
+        <label>Sort
+          <select id="sortby" aria-label="Sort photos by">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="added">Recently indexed</option>
+            <option value="name">Filename</option>
+          </select>
+        </label>
+      </div>
+    </div>
+    <div id="groups"></div>
+    <div class="end" id="end"></div>
+  </section>
+
+  <section id="people-view" hidden>
+    <div class="people-head">
+      <h2>People</h2>
+      <p>Name a group once. New photos of that person are matched automatically.</p>
+    </div>
+    <div id="named" class="facerow"></div>
+    <h3 class="sub" id="unnamed-h" hidden>Waiting for a name</h3>
+    <div id="clusters" class="clusters"></div>
+  </section>
+
+  <section id="places-view" hidden>
+    <div class="people-head">
+      <h2>Places</h2>
+      <p>Photos that recorded where they were taken.</p>
+    </div>
+    <div id="map"></div>
+    <div id="map-empty" class="empty" hidden></div>
+  </section>
+
+  <section id="dupes-view" hidden>
+    <div class="people-head">
+      <h2>Duplicates</h2>
+      <p>The same photo kept in more than one place, and near-identical shots.</p>
+    </div>
+    <label class="toggle"><input type="checkbox" id="near-toggle"> Also find visually similar photos</label>
+    <div id="dupes"></div>
+  </section>
+
+  <section id="library-view" hidden>
+    <div class="people-head">
+      <h2>Library</h2>
+      <p>Folders you have indexed. Your photos are never moved or changed.</p>
+    </div>
+    <div id="stats" class="stats"></div>
+    <div class="roots-head">
+      <h3 class="sub">Folders</h3>
+      <button id="addroot" class="primary">Add folder</button>
+    </div>
+    <div id="roots" class="roots"></div>
+  </section>
+
+  <div id="picker" class="modal" hidden>
+    <div class="sheetbox" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+      <div class="modal-hd">
+        <h3 id="picker-title">Choose a folder</h3>
+        <button id="picker-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="picker-body">
+        <nav class="places" id="shortcuts"></nav>
+        <ul class="dirs" id="dirs"></ul>
+      </div>
+      <div class="modal-ft">
+        <label class="sel">Selected <code id="picked">—</code></label>
+        <input id="rootlabel" placeholder="Name it (optional)" aria-label="Label for this folder">
+        <button id="picker-add" class="primary" disabled>Add to library</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id="lightbox" class="lightbox" hidden>
+  <button class="lb-close" aria-label="Close">&times;</button>
+  <button class="lb-nav prev" aria-label="Previous">&#8249;</button>
+  <button class="lb-nav next" aria-label="Next">&#8250;</button>
+  <figure class="lb-stage"><img id="lb-img" alt=""></figure>
+  <aside class="lb-rail" id="lb-rail"></aside>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

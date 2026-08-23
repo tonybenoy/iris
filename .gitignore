@@ -1,0 +1,82 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# uv resolves this from pyproject.toml; committing it is optional and it is
+# large, so it stays out until this is pinned for reproducible installs.
+uv.lock
+
+# ------------------------------------------------------------ Iris data
+# None of this belongs in version control: it is generated, machine-specific,
+# or a record of somebody's private photo library.
+#
+# The real library lives outside the repo (~/.local/share/photo_anotater on
+# Linux, %LOCALAPPDATA% on Windows). These patterns catch it anyway, in case
+# someone points data_dir at the checkout.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+config.toml
+sidecars/
+thumbs/
+vectors/
+models/
+*.xmp
+
+# Photos themselves, in case any are ever copied in for testing.
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.avif
+*.heic
+*.heif
+*.tif
+*.tiff
+*.bmp
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.dng
+*.orf
+*.rw2
+*.raf
+*.pef
+# ...but test fixtures are meant to be committed.
+!tests/fixtures/**
+
+# ------------------------------------------------------------ Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets.*
+.hf_token
+
+# ---------------------------------------------------------------- Tooling
+node_modules/
+package-lock.json
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.idea/
+.vscode/
+
+# Machine-local editor/agent permissions, not project configuration.
+.claude/settings.local.json
