@@ -37,6 +37,21 @@ pa = "pa.cli:app"
 [dependency-groups]
 dev = ["pytest>=8.3", "pytest-asyncio>=0.25", "ruff>=0.9"]
 
+# PyPI's torch wheels bundle the CUDA runtime on Linux only -- the Windows wheel
+# is CPU-only (122MB vs 526MB), so `uv sync --extra ml` on Windows yields a build
+# where torch.cuda.is_available() is False regardless of the hardware. That also
+# breaks face detection, since pa/providers/_cuda.py finds onnxruntime's CUDA
+# libraries by borrowing the ones torch vendors. PyTorch publishes the CUDA
+# builds on its own index instead; cu130 covers Blackwell (sm_120).
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32'" }]
+
 [tool.uv]
 # insightface depends on the CPU-only `onnxruntime` package. Installed alongside
 # `onnxruntime-gpu` it shares the same import path and shadows the GPU build's
