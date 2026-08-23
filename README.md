@@ -8,6 +8,25 @@ makes the lot searchable — by meaning, by words, by person, by date.
 
 Nothing leaves the machine. Originals are never modified.
 
+Install first — the same one command on Linux, macOS and Windows.
+[`uv`](https://docs.astral.sh/uv/) installs Python 3.12 itself, so it is the only
+prerequisite:
+
+```bash
+uv sync --extra ml
+```
+
+That puts the `pa` command inside the project's `.venv`, not on your PATH. Either
+prefix commands with `uv run` (`uv run pa config init`), or activate the
+environment once per shell:
+
+| | |
+|---|---|
+| **Linux / macOS** | `source .venv/bin/activate` |
+| **Windows (PowerShell)** | `.\.venv\Scripts\Activate.ps1` |
+
+Then:
+
 ```bash
 pa config init                      # write a commented settings file
 pa config check                     # confirm the model server and GPU are reachable
@@ -71,9 +90,8 @@ Iris never deletes or modifies your photos. It only reacts to what you do:
   detection add about 3GB.
 - [LM Studio](https://lmstudio.ai) with a vision model loaded, for captions
 
-```bash
-uv sync --extra ml
-```
+Everything else is installed by `uv sync --extra ml`. Without `--extra ml` you
+get a working CLI that cannot embed, detect faces or caption.
 
 ## Models
 
@@ -99,7 +117,7 @@ Image embeddings deliberately do **not** go through LM Studio: its
 |---|---|
 | **Linux** | fully supported and what this was developed on |
 | **WSL** | supported; Windows drives are reached through `/mnt/*` |
-| **Windows (native)** | code paths are in place — drive serials via `GetVolumeInformationW`, DLL preloading for the GPU — but **not yet tested on real hardware** |
+| **Windows (native)** | supported; drive serials via `GetVolumeInformationW`, DLL preloading for the GPU |
 | **macOS** | untested. No CUDA, so embeddings and faces fall back to CPU |
 
 A library is portable between WSL and native Windows: both read the same NTFS
@@ -366,9 +384,6 @@ uv run scripts/bench_vlm.py --model google/gemma-4-12b-qat ~/Pictures/*.jpg
 - The vector index is a memory-mapped brute-force scan: ~150ms at 500k photos.
   Past roughly 1M it should be swapped for a real ANN index, behind the same
   three methods in `pa/search/vectors.py`.
-- Native Windows support is written but unverified on real hardware. RAW
-  decoding is wired through LibRaw but has not been run against an actual
-  `.CR2`/`.NEF` — both are the paths most likely to need a fix.
 - There is no authentication. The server binds to `127.0.0.1`, and the folder
   browser would expose your directory structure to anything that can reach the
   port, so do not bind it to `0.0.0.0` on a shared network.
