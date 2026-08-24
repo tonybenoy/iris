@@ -191,36 +191,10 @@ let timer;
 $('#q').addEventListener('input', e => {
   clearTimeout(timer);
   const v = e.target.value;
-  timer = setTimeout(() => { state.q = v; $('#groupby').value = state.group;
-$('#sortby').value = state.sort;
-$('#groupby').addEventListener('change', (e) => {
-  state.group = e.target.value;
-  try { localStorage.setItem('pa.group', state.group); } catch { /* private window */ }
-  render();  // grouping is client-side: no refetch needed
-});
-$('#sortby').addEventListener('change', (e) => {
-  state.sort = e.target.value;
-  try { localStorage.setItem('pa.sort', state.sort); } catch { /* private window */ }
-  load(true);  // ordering comes from the server
-});
-
-load(true); }, 220);
+  timer = setTimeout(() => { state.q = v; load(true); }, 220);
 });
 $('#searchform').addEventListener('submit', e => {
-  e.preventDefault(); clearTimeout(timer); state.q = $('#q').value; $('#groupby').value = state.group;
-$('#sortby').value = state.sort;
-$('#groupby').addEventListener('change', (e) => {
-  state.group = e.target.value;
-  try { localStorage.setItem('pa.group', state.group); } catch { /* private window */ }
-  render();  // grouping is client-side: no refetch needed
-});
-$('#sortby').addEventListener('change', (e) => {
-  state.sort = e.target.value;
-  try { localStorage.setItem('pa.sort', state.sort); } catch { /* private window */ }
-  load(true);  // ordering comes from the server
-});
-
-load(true);
+  e.preventDefault(); clearTimeout(timer); state.q = $('#q').value; load(true);
 });
 addEventListener('scroll', () => {
   if (innerHeight + scrollY > document.body.offsetHeight - 900) load(false);
@@ -422,20 +396,7 @@ async function loadPeople() {
   $('#named').querySelectorAll('.person .go').forEach(b => b.addEventListener('click', () => {
     const card = b.closest('.person');
     $('#q').value = `person:"${card.dataset.name}"`;
-    state.q = $('#q').value; show('grid'); $('#groupby').value = state.group;
-$('#sortby').value = state.sort;
-$('#groupby').addEventListener('change', (e) => {
-  state.group = e.target.value;
-  try { localStorage.setItem('pa.group', state.group); } catch { /* private window */ }
-  render();  // grouping is client-side: no refetch needed
-});
-$('#sortby').addEventListener('change', (e) => {
-  state.sort = e.target.value;
-  try { localStorage.setItem('pa.sort', state.sort); } catch { /* private window */ }
-  load(true);  // ordering comes from the server
-});
-
-load(true);
+    state.q = $('#q').value; show('grid'); load(true);
   }));
   $('#named').querySelectorAll('.person .edit').forEach(b => b.addEventListener('click', async () => {
     const card = b.closest('.person');
