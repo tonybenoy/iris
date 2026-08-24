@@ -285,7 +285,9 @@ async function openLightbox(i, list) {
       (d.faces.length ? `<div class="lb-sec">faces</div><div class="facerow-lb">${d.faces.map(f =>
         `<div class="facelb" data-face="${f.id}">
            <img src="/api/face/${f.id}" alt="">
-           <b>${esc(f.person_name || 'unnamed')}</b>
+           <button class="who" title="${f.person_name
+             ? 'Wrong person? Say who this really is' : 'Say who this is'}"
+           >${esc(f.person_name || 'name this')}</button>
            ${f.person_name ? '<button class="x" title="Not this person">&times;</button>' : ''}
            <button class="ig" title="Ignore this face - someone you do not need to name">
              ignore</button>
@@ -411,11 +413,19 @@ function wireTagEditor(photoId, d) {
     await save(manual());
   });
 
+  /* Grouping is what makes naming fast, and also what gets one face in forty
+     wrong. The photo is where you can see that it is wrong, so it is where it
+     has to be fixable -- previously the only move here was to detach the face
+     and wait for the next clustering run to guess again. */
+  knownPeople();
+  $('#lb-rail').querySelectorAll('.facelb .who').forEach(btn =>
+    btn.addEventListener('click', () => nameFaceHere(btn)));
+
   $('#lb-rail').querySelectorAll('.facelb .x').forEach(btn =>
     btn.addEventListener('click', async () => {
       const card = btn.closest('.facelb');
       await api(`/api/faces/${card.dataset.face}/detach`, { method: 'POST' });
-      card.querySelector('b').textContent = 'unnamed';
+      card.querySelector('.who').textContent = 'name this';
       btn.remove();
     }));
 
@@ -429,6 +439,77 @@ function wireTagEditor(photoId, d) {
       card.remove();
     }));
 }
+/* The list of names offered while typing. Filled by the People screen when it
+   loads, so the lightbox tops it up rather than assuming anyone has been
+   there. */
+async function knownPeople() {
+  if ($('#known-people').children.length) return;
+  const d = await api('/api/people').catch(() => null);
+  if (!d) return;
+  $('#known-people').innerHTML = d.people.filter(p => p.name)
+    .map(p => `<option value="${esc(p.name)}">`).join('');
+}
+
+function nameFaceHere(btn) {
+  const card = btn.closest('.facelb');
+  if (card.querySelector('form')) return;
+  const was = btn.textContent.trim();
+  const form = document.createElement('form');
+  form.className = 'whoform';
+  form.innerHTML = `<input list="known-people" autocomplete="off" aria-label="Who is this?"
+                           placeholder="Who is this?" value="${esc(was === 'name this' ? '' : was)}">`;
+  btn.replaceWith(form);
+  const input = form.querySelector('input');
+  input.focus();
+  input.select();
+
+  const restore = (label) => {
+    const b = document.createElement('button');
+    b.className = 'who';
+    b.textContent = label;
+    b.title = 'Wrong person? Say who this really is';
+    b.addEventListener('click', () => nameFaceHere(b));
+    form.replaceWith(b);
+  };
+  // Escape and clicking away both mean "leave it as it was".
+  input.addEventListener('keydown', (e) => { if (e.key === 'Escape') restore(was); });
+  input.addEventListener('blur', () => setTimeout(() => {
+    if (form.isConnected) restore(was);
+  }, 120));
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = input.value.trim();
+    if (!name || name === was) { restore(was); return; }
+    input.disabled = true;
+    try {
+      const r = await api(`/api/faces/${card.dataset.face}/name`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      restore(r.name);
+      if (r.created) $('#known-people').insertAdjacentHTML(
+        'beforeend', `<option value="${esc(r.name)}">`);
+      // The card keeps a "not this person" button only once it has a name.
+      if (!card.querySelector('.x')) {
+        const x = document.createElement('button');
+        x.className = 'x';
+        x.title = 'Not this person';
+        x.innerHTML = '&times;';
+        x.addEventListener('click', async () => {
+          await api(`/api/faces/${card.dataset.face}/detach`, { method: 'POST' });
+          card.querySelector('.who').textContent = 'name this';
+          x.remove();
+        });
+        card.insertBefore(x, card.querySelector('.ig'));
+      }
+    } catch (err) {
+      alert(err.message);
+      restore(was);
+    }
+  });
+}
+
 const closeLb = () => { $('#lightbox').hidden = true; $('#lb-img').src = ''; };
 const step = (d) => {
   const n = state.cursor + d;

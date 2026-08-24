@@ -599,6 +599,25 @@ def create_app() -> FastAPI:
         conn.commit()
         return {"ok": True}
 
+    @app.post("/api/faces/{face_id}/name")
+    def api_name_face(face_id: int, body: NameIn) -> Any:
+        """Say who one face is, while looking at the photo it is in.
+
+        Grouping is what makes naming fast, and it is also what makes it wrong
+        one face at a time: someone in a group of forty is not that person, and
+        until now the only answer was to detach them and hope the next
+        clustering run guessed better. The photo is where you can see that it is
+        wrong, so it is where it should be fixable.
+        """
+        from pa.faces.cluster import name_face
+        name = body.name.strip()
+        if not name:
+            raise HTTPException(400, "a name is needed")
+        result = name_face(db(), face_id, name)
+        if result is None:
+            raise HTTPException(404, "no such face")
+        return {"ok": True, **result}
+
     @app.post("/api/people/{person_id}/merge")
     def api_merge_people(person_id: int, into: int) -> Any:
         """Fold one named person into another.

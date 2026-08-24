@@ -203,8 +203,16 @@ main{padding:0 20px 80px}
 .facelb{position:relative;text-align:center}
 .facelb img{width:56px;height:56px;border-radius:6px;object-fit:cover;display:block;
   background:var(--raised)}
-.facelb b{display:block;font-size:11px;font-weight:500;margin-top:4px;max-width:56px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The name is the control: clicking it is how you correct it, so it has to
+   look clickable without turning a row of faces into a row of buttons. */
+.facelb .who{display:block;width:56px;font-size:11px;font-weight:500;margin-top:4px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);
+  border-bottom:1px dotted transparent;padding:0}
+.facelb .who:hover{color:var(--lex);border-bottom-color:var(--lex)}
+.facelb .whoform{margin-top:4px}
+.facelb .whoform input{width:78px;background:var(--raised);border:1px solid var(--lex);
+  border-radius:5px;padding:2px 5px;color:var(--text);font-size:11px;text-align:center}
+.facelb .whoform input:focus{outline:none}
 .facelb .x{position:absolute;top:-5px;right:-5px;width:19px;height:19px;border-radius:50%;
   background:var(--raised);border:1px solid var(--line);font-size:12px;line-height:1;
   color:var(--faint);opacity:0;transition:opacity .15s}

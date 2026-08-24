@@ -133,28 +133,69 @@ def recluster(conn: sqlite3.Connection, cfg) -> ClusterStats:
     return stats
 
 
+def person_for_name(conn: sqlite3.Connection, name: str) -> tuple[int, bool]:
+    """The person with this name, created if they are new. Returns (id, is_new).
+
+    Matching on the name is what makes typing a name you already use attach to
+    that person instead of quietly making a second one under the same spelling.
+    """
+    row = conn.execute("SELECT id FROM person WHERE name=?", (name,)).fetchone()
+    if row:
+        return row["id"], False
+    return conn.execute("INSERT INTO person (name, created_at) VALUES (?,?)",
+                        (name, repo.now())).lastrowid, True
+
+
+def _set_cover(conn: sqlite3.Connection, person_id: int) -> None:
+    """Give a new person the clearest face they have to be recognised by."""
+    cover = conn.execute(
+        "SELECT id FROM face WHERE person_id=? ORDER BY det_score DESC LIMIT 1",
+        (person_id,)).fetchone()
+    if cover:
+        conn.execute("UPDATE person SET cover_face_id=? WHERE id=?",
+                     (cover["id"], person_id))
+
+
 def name_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> int:
     """Turn a proposed cluster into a named person. This is the single most
     valuable user action in the app, so it is one call."""
-    row = conn.execute("SELECT id FROM person WHERE name=?", (name,)).fetchone()
-    person_id = row["id"] if row else conn.execute(
-        "INSERT INTO person (name, created_at) VALUES (?,?)",
-        (name, repo.now())).lastrowid
-
+    person_id, is_new = person_for_name(conn, name)
     faces = conn.execute("SELECT id, photo_id FROM face WHERE cluster_id=?",
                          (cluster_id,)).fetchall()
     conn.executemany("UPDATE face SET person_id=?, confirmed=1, cluster_id=NULL WHERE id=?",
                      [(person_id, f["id"]) for f in faces])
-    if not row:
-        cover = conn.execute(
-            "SELECT id FROM face WHERE person_id=? ORDER BY det_score DESC LIMIT 1",
-            (person_id,)).fetchone()
-        if cover:
-            conn.execute("UPDATE person SET cover_face_id=? WHERE id=?", (cover["id"], person_id))
+    if is_new:
+        _set_cover(conn, person_id)
     for f in faces:
         repo.reindex_fts(conn, f["photo_id"])
     conn.commit()
     return len(faces)
+
+
+def name_face(conn: sqlite3.Connection, face_id: int, name: str) -> dict | None:
+    """Say who one face is, from the photo it is in.
+
+    Clustering works on whole groups, which is what makes naming fast and also
+    what makes it wrong in the particular: one face in a group of forty belongs
+    to somebody else, and the only way to fix that was to detach it and wait for
+    the next clustering run to guess again. Here the answer is simply given.
+
+    Naming a face that was ignored brings it back -- deciding who somebody is
+    is the opposite of not caring who they are.
+    """
+    row = conn.execute("SELECT photo_id FROM face WHERE id=?", (face_id,)).fetchone()
+    if row is None:
+        return None
+    person_id, is_new = person_for_name(conn, name)
+    conn.execute(
+        """UPDATE face SET person_id=?, confirmed=1, cluster_id=NULL,
+                           rejected=0, ignored_as=NULL WHERE id=?""",
+        (person_id, face_id))
+    if is_new:
+        _set_cover(conn, person_id)
+    repo.reindex_fts(conn, row["photo_id"])
+    conn.commit()
+    return {"person_id": person_id, "name": name, "created": is_new}
 
 
 def suggest_people(conn: sqlite3.Connection, cfg, cluster_ids: list[int],

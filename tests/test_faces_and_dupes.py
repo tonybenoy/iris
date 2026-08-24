@@ -533,3 +533,49 @@ def test_two_undecided_copies_keep_one(client, tmp_path):
 
     assert client.post("/api/faces/dedupe").json()["removed"] == 1
     assert {r[0] for r in conn.execute("SELECT id FROM face")} == {90, 92}
+
+
+# ------------------------------------------- naming one face from its photo
+def test_naming_a_face_from_the_photo(client):
+    """Grouping is what makes naming fast and also what gets one face in forty
+    wrong. Until now the only answer in the photo view was to detach the face
+    and hope the next clustering run guessed better."""
+    r = client.post("/api/faces/1/name", json={"name": "Ada"})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] is True
+
+    photo = client.get("/api/photos/1").json()
+    named = {f["id"]: f["person_name"] for f in photo["faces"]}
+    assert named[1] == "Ada"
+    assert named[2] is None, "only the face named was touched"
+
+
+def test_correcting_a_face_moves_it_to_the_right_person(client):
+    client.post("/api/clusters/7/name", json={"name": "Ada"})       # faces 1 and 2
+    client.post("/api/faces/1/name", json={"name": "Grace"})
+
+    people = {p["name"]: p["n"] for p in client.get("/api/people").json()["people"]}
+    assert people == {"Ada": 1, "Grace": 1}
+
+
+def test_an_existing_name_attaches_rather_than_making_a_second_person(client):
+    client.post("/api/faces/1/name", json={"name": "Ada"})
+    r = client.post("/api/faces/2/name", json={"name": "Ada"})
+    assert r.json()["created"] is False
+    people = client.get("/api/people").json()["people"]
+    assert len(people) == 1 and people[0]["n"] == 2
+
+
+def test_naming_an_ignored_face_brings_it_back(client):
+    """Deciding who somebody is is the opposite of not caring who they are."""
+    client.post("/api/faces/3/ignore")
+    assert client.get("/api/faces/ignored").json()["loose"] == 1
+
+    client.post("/api/faces/3/name", json={"name": "Ada"})
+    photo = client.get("/api/photos/1").json()
+    assert [f["person_name"] for f in photo["faces"] if f["id"] == 3] == ["Ada"]
+
+
+def test_a_blank_name_is_refused(client):
+    assert client.post("/api/faces/1/name", json={"name": "   "}).status_code == 400
+    assert client.post("/api/faces/999/name", json={"name": "Ada"}).status_code == 404
