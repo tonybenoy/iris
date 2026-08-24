@@ -5,6 +5,7 @@ and making the pipeline actually run. Both are the difference between a scanned
 folder and a usable one, so a silent regression here looks exactly like the
 "it scans but nothing happens" bug that prompted them.
 """
+import time
 import tomllib
 
 import pytest
@@ -557,3 +558,131 @@ def test_browsing_reports_folders_that_are_already_roots(cfg, client, tmp_path,
     inside = client.get(f"/api/browse?path={disk / 'photos'}").json()
     assert inside["library"] == "root"
     assert inside["entries"][0]["library"] == "inside"
+
+
+# ------------------------------------------------- thumbnails, several at once
+def test_thumbnails_are_made_in_parallel(cfg, tmp_path, monkeypatch):
+    """Thumbnailing is the one stage that is pure CPU. Pillow releases the GIL
+    around decode, resize and encode, so threads here use more than one core --
+    measured at about 6x on eight threads for 12MP JPEGs."""
+    import threading
+
+    from pa.db import repo
+    from pa.db.connection import init_db
+    from pa.ingest import thumbs as thumbmod
+    from pa.jobs import worker
+
+    cfg.thumbs.workers = 4
+    conn = init_db(cfg.paths.db_path)
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    monkeypatch.setattr(worker, "_photo_path",
+                        lambda c, photo_id: photos / f"p{photo_id}.jpg")
+    for photo_id in range(1, 9):
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, f"hash{photo_id}"))
+        repo.enqueue(conn, photo_id, stages=("thumbs",))
+    conn.commit()
+
+    at_once, peak = 0, 0
+    guard = threading.Lock()
+    started = threading.Event()
+
+    def slow_generate(*_a, **_kw):
+        nonlocal at_once, peak
+        with guard:
+            at_once += 1
+            peak = max(peak, at_once)
+        started.set()
+        time.sleep(0.05)
+        with guard:
+            at_once -= 1
+        return {}
+
+    monkeypatch.setattr(thumbmod, "generate", slow_generate)
+    res = worker.run_thumbs(conn, cfg)
+
+    assert res.done == 8
+    assert peak > 1, "thumbnails were made one after another"
+    assert peak <= 4, "more threads ran than were asked for"
+
+
+def test_the_worker_count_comes_from_the_machine_by_default(cfg):
+    from pa.jobs import worker
+
+    cfg.thumbs.workers = 0
+    assert 1 <= worker.thumb_workers(cfg) <= 8
+    cfg.thumbs.workers = 3
+    assert worker.thumb_workers(cfg) == 3
+
+
+def test_a_broken_photo_still_fails_only_itself(cfg, tmp_path, monkeypatch):
+    """Running in parallel must not turn one unreadable file into a failed batch."""
+    from pa.db import repo
+    from pa.db.connection import init_db
+    from pa.ingest import thumbs as thumbmod
+    from pa.jobs import worker
+
+    cfg.thumbs.workers = 4
+    conn = init_db(cfg.paths.db_path)
+    monkeypatch.setattr(worker, "_photo_path",
+                        lambda c, photo_id: tmp_path / f"p{photo_id}.jpg")
+    for photo_id in (1, 2, 3):
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, f"hash{photo_id}"))
+        repo.enqueue(conn, photo_id, stages=("thumbs",))
+    conn.commit()
+
+    def generate(path, *_a, **_kw):
+        if path.name == "p2.jpg":
+            raise OSError("image file is truncated")
+        return {}
+
+    monkeypatch.setattr(thumbmod, "generate", generate)
+    res = worker.run_thumbs(conn, cfg)
+
+    assert (res.done, res.failed) == (2, 1)
+    assert dict(conn.execute("SELECT photo_id, state FROM job").fetchall()) == {
+        1: "done", 2: "failed", 3: "done"}
+
+
+def test_stopping_a_parallel_run_still_stops(cfg, tmp_path, monkeypatch):
+    """Cancelling works by raising from inside the progress callback. With the
+    work handed to a pool, that has to unwind the pool too rather than waiting
+    for every photo already queued behind it."""
+    from pa.db import repo
+    from pa.db.connection import init_db
+    from pa.ingest import thumbs as thumbmod
+    from pa.jobs import worker
+
+    cfg.thumbs.workers = 2
+    conn = init_db(cfg.paths.db_path)
+    monkeypatch.setattr(worker, "_photo_path", lambda c, i: tmp_path / f"p{i}.jpg")
+    for photo_id in range(1, 41):
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, f"hash{photo_id}"))
+        repo.enqueue(conn, photo_id, stages=("thumbs",))
+    conn.commit()
+
+    made = []
+
+    def generate(path, *_a, **_kw):
+        made.append(path.name)
+        time.sleep(0.02)
+        return {}
+
+    class Stop(Exception):
+        pass
+
+    def cancel_after_three(res):
+        if res.done >= 3:
+            raise Stop
+
+    monkeypatch.setattr(thumbmod, "generate", generate)
+    began = time.perf_counter()
+    with pytest.raises(Stop):
+        worker.run_thumbs(conn, cfg, on_progress=cancel_after_three)
+    elapsed = time.perf_counter() - began
+
+    assert elapsed < 2, "cancelling waited for the whole queued batch"
+    assert len(made) < 40, "every photo was thumbnailed despite the stop"

@@ -1357,6 +1357,10 @@ const SETTINGS = [
         help: 'Also the image the AI stages actually look at.' },
       { k: 'quality', label: 'Quality', type: 'number' },
       { k: 'format', label: 'Format', type: 'select', options: ['WEBP', 'JPEG', 'PNG'] },
+      { k: 'workers', label: 'Photos at once', type: 'number',
+        help: 'Thumbnailing is the one stage that is pure CPU, and it scales ' +
+              'almost linearly until the cores run out. 0 picks a number from ' +
+              'this machine. Lower it if indexing makes everything else sluggish.' },
     ] },
   { key: 'sidecar', title: 'XMP sidecars',
     blurb: 'Where exported metadata is written for Lightroom and digiKam.',
