@@ -222,3 +222,54 @@ def test_a_person_cannot_be_merged_into_themselves(client):
     pid = client.get("/api/people").json()["people"][0]["id"]
     assert client.post(f"/api/people/{pid}/merge?into={pid}").status_code == 400
     assert client.post(f"/api/people/{pid}/merge?into=9999").status_code == 404
+
+
+# ------------------------------------------------------------- face crops
+def _make_view_thumb(cfg, digest: str, size: tuple[int, int]) -> None:
+    from PIL import Image
+
+    from pa.ingest import thumbs
+    path = thumbs.thumb_path(cfg.paths.thumbs_dir, digest, "view",
+                             cfg.thumbs.format.lower())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, "grey").save(path, cfg.thumbs.format)
+
+
+def test_face_crop_rescales_a_box_detected_on_a_bigger_image(client, tmp_path):
+    """Faces are detected on whatever _stage_source hands over -- the original
+    if no thumbnail existed yet -- but crops always come from the view
+    thumbnail. Cropping with the detector's coordinates then asks for a region
+    far outside a 400px image, and PIL raises "right is less than left": a 500
+    on every face card on the People screen."""
+    import pa.config as cfgmod
+
+    cfg = cfgmod._cfg
+    _make_view_thumb(cfg, "hash1", (400, 300))
+
+    from pa.db.connection import init_db
+    conn = init_db(cfg.paths.db_path)
+    # As if detected on a 6000x4000 original: a face near the right-hand edge.
+    conn.execute("""UPDATE face SET bbox_x=5200, bbox_y=1000, bbox_w=400, bbox_h=400,
+                                    src_w=6000, src_h=4000 WHERE id=1""")
+    conn.commit()
+
+    r = client.get("/api/face/1")
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "image/webp"
+
+
+def test_face_crop_survives_a_box_it_cannot_place(client, tmp_path):
+    """Libraries indexed before src_w was recorded have no way to rescale. A
+    wrong crop is still nameable; a 500 is not."""
+    import pa.config as cfgmod
+
+    cfg = cfgmod._cfg
+    _make_view_thumb(cfg, "hash1", (400, 300))
+
+    from pa.db.connection import init_db
+    conn = init_db(cfg.paths.db_path)
+    conn.execute("""UPDATE face SET bbox_x=5200, bbox_y=-40, bbox_w=400, bbox_h=400,
+                                    src_w=NULL, src_h=NULL WHERE id=1""")
+    conn.commit()
+
+    assert client.get("/api/face/1").status_code == 200

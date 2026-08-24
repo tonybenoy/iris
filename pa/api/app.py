@@ -41,6 +41,40 @@ def _model_cache_dir() -> str:
         return "(transformers not installed)"
 
 
+def _scaled_box(face, width: int, height: int) -> tuple[float, float, float, float]:
+    """A face box in the pixel space of the image being cropped right now.
+
+    Boxes are stored in the coordinates of the thumbnail the detector ran on,
+    and that thumbnail is not permanent: changing thumbs.view_px and rebuilding
+    remakes it at another size. Cropping with the stale numbers then asks for a
+    region outside the image, which PIL rejects with "Coordinate 'right' is less
+    than 'left'". src_w/src_h are recorded for exactly this, so rescale instead
+    of trusting that the thumbnail never changed.
+    """
+    x, y, w, h = (float(face["bbox_x"]), float(face["bbox_y"]),
+                  float(face["bbox_w"]), float(face["bbox_h"]))
+    src_w, src_h = face["src_w"], face["src_h"]
+    if src_w and src_h and (src_w != width or src_h != height):
+        sx, sy = width / src_w, height / src_h
+        x, y, w, h = x * sx, y * sy, w * sx, h * sy
+    return x, y, w, h
+
+
+def _clamped(left: float, top: float, right: float, bottom: float,
+             width: int, height: int) -> tuple[int, int, int, int]:
+    """An integer crop box guaranteed to be inside the image and at least 1px.
+
+    Faces detected at the frame edge have negative coordinates, and a box from
+    a photo whose thumbnail changed shape can miss entirely. Neither is worth a
+    500: a slightly wrong crop still lets you recognise and name the person.
+    """
+    left = min(max(left, 0), width - 1)
+    top = min(max(top, 0), height - 1)
+    right = max(min(right, width), left + 1)
+    bottom = max(min(bottom, height), top + 1)
+    return int(left), int(top), int(right), int(bottom)
+
+
 # These MUST live at module scope. This file uses `from __future__ import
 # annotations`, so every annotation is a string that FastAPI resolves against
 # the module's globals. A model defined inside create_app() is invisible there,
@@ -307,7 +341,8 @@ def create_app() -> FastAPI:
 
         Bounding boxes are in the coordinate space of the image the detector
         actually ran on: the cached 'view' thumbnail (see _stage_source), not the
-        original. Cropping from that same thumbnail keeps the two in step.
+        original. That thumbnail can have been rebuilt at another size since, so
+        the box is rescaled to the file on disk rather than assumed to match it.
         """
         import io
 
@@ -316,7 +351,7 @@ def create_app() -> FastAPI:
 
         conn = db()
         face = conn.execute(
-            """SELECT f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, p.blake3
+            """SELECT f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h, f.src_w, f.src_h, p.blake3
                FROM face f JOIN photo p ON p.id=f.photo_id WHERE f.id=?""",
             (face_id,)).fetchone()
         if face is None:
@@ -328,13 +363,12 @@ def create_app() -> FastAPI:
 
         with Image.open(src) as img:
             img = img.convert("RGB")
-            x, y, w, h = face["bbox_x"], face["bbox_y"], face["bbox_w"], face["bbox_h"]
+            x, y, w, h = _scaled_box(face, img.width, img.height)
             # 35% padding: a tight ArcFace box cuts the hair and chin, which are
             # most of what a person uses to recognise someone at thumbnail size.
-            pad = int(max(w, h) * 0.35)
-            box = (max(x - pad, 0), max(y - pad, 0),
-                   min(x + w + pad, img.width), min(y + h + pad, img.height))
-            crop = img.crop(box)
+            pad = max(w, h) * 0.35
+            crop = img.crop(_clamped(x - pad, y - pad, x + w + pad, y + h + pad,
+                                     img.width, img.height))
             crop.thumbnail((size, size), Image.LANCZOS)
             buf = io.BytesIO()
             crop.save(buf, "WEBP", quality=85)
