@@ -438,3 +438,93 @@ def test_asking_for_clustering_twice_does_not_run_it_twice(cfg, monkeypatch):
     runner.start(cfg, ["faces", "cluster"])
     runner._thread.join(10)
     assert ran == ["faces", "cluster"]
+
+
+# --------------------------------------------------- one bad file in a batch
+@pytest.fixture
+def embed_queue(cfg):
+    """Four photos waiting to be embedded, with a readable thumbnail each."""
+    from pa.db.connection import init_db
+    from pa.ingest import thumbs as thumbmod
+
+    conn = init_db(cfg.paths.db_path)
+    for photo_id in (1, 2, 3, 4):
+        digest = f"hash{photo_id}"
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, digest))
+        conn.execute("INSERT INTO job (photo_id, stage, state, priority, created_at) "
+                     "VALUES (?,'embed','pending',100,0)", (photo_id,))
+        path = thumbmod.thumb_path(cfg.paths.thumbs_dir, digest, "view",
+                                   cfg.thumbs.format.lower())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8)).save(path, cfg.thumbs.format)
+    conn.commit()
+    return conn
+
+
+class _Embedder:
+    """Fails on one photo, the way PIL does for a file that stops halfway."""
+    model_version = "test"
+
+    def __init__(self, bad_index=None, error=None):
+        self.bad, self.error = bad_index, error or OSError(
+            "image file is truncated (20 bytes not processed)")
+        self.calls = []
+
+    def embed_images(self, images):
+        import numpy as np
+        self.calls.append(len(images))
+        for image in images:
+            if self.bad is not None and bytes(image).find(self.bad) >= 0:
+                raise self.error
+        return np.ones((len(images), 4), dtype=np.float32)
+
+
+def _mark_bad(cfg, conn, photo_id, marker=b"BROKEN"):
+    """Make one photo's source identifiable to the fake embedder."""
+    from pa.ingest import thumbs as thumbmod
+    digest = conn.execute("SELECT blake3 FROM photo WHERE id=?", (photo_id,)).fetchone()[0]
+    path = thumbmod.thumb_path(cfg.paths.thumbs_dir, digest, "view",
+                               cfg.thumbs.format.lower())
+    path.write_bytes(marker)
+    return marker
+
+
+def test_one_truncated_file_does_not_block_the_whole_queue(cfg, embed_queue):
+    """The batch was returned to the queue whole, so the next run claimed the
+    same photos, failed on the same one, and put them back again. One corrupt
+    file left 1171 photos unindexed, every run reporting "0 done" in a second."""
+    from pa.jobs import worker
+
+    marker = _mark_bad(cfg, embed_queue, 3)
+    res = worker.run_embed(embed_queue, cfg, _Embedder(bad_index=marker))
+
+    assert res.done == 3, "the readable photos must still be embedded"
+    assert res.failed == 1
+    states = dict(embed_queue.execute(
+        "SELECT photo_id, state FROM job WHERE stage='embed'").fetchall())
+    assert states == {1: "done", 2: "done", 3: "failed", 4: "done"}
+
+
+def test_the_bad_photo_is_named_in_the_errors(cfg, embed_queue):
+    from pa.jobs import worker
+
+    marker = _mark_bad(cfg, embed_queue, 2)
+    res = worker.run_embed(embed_queue, cfg, _Embedder(bad_index=marker))
+    assert any("photo 2" in e and "truncated" in e for e in res.errors), res.errors
+
+
+def test_a_gpu_failure_still_puts_the_batch_back(cfg, embed_queue):
+    """A photo is not at fault when the GPU runs out of memory, and marking four
+    thousand of them failed for it would be unrecoverable without a retry pass."""
+    from pa.jobs import worker
+
+    class OutOfMemory(_Embedder):
+        def embed_images(self, images):
+            raise RuntimeError("CUDA out of memory")
+
+    res = worker.run_embed(embed_queue, cfg, OutOfMemory())
+    assert res.done == 0 and res.failed == 0
+    states = {r[0] for r in embed_queue.execute(
+        "SELECT DISTINCT state FROM job WHERE stage='embed'")}
+    assert states == {"pending"}, "an out-of-memory batch must stay in the queue"

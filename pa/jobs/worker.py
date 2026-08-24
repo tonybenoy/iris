@@ -132,6 +132,55 @@ def _stage_source(conn: sqlite3.Connection, cfg, photo_id: int) -> Path | None:
     return cached if cached.exists() else _photo_path(conn, photo_id)
 
 
+def _photo_is_the_problem(exc: BaseException) -> bool:
+    """Whether a failure belongs to this photo or to the machine.
+
+    PIL raises OSError for a file that stops halfway and UnidentifiedImageError
+    for something that is not an image at all. Those are permanent facts about
+    that photo. A CUDA out-of-memory or a missing model is the opposite: the
+    photo is innocent and the same work will succeed later.
+    """
+    from PIL import UnidentifiedImageError
+    return isinstance(exc, (UnidentifiedImageError, OSError, ValueError))
+
+
+def _embed_one_at_a_time(conn: sqlite3.Connection, embedder, jobs: list, payload: list,
+                         res: StageResult):
+    """Re-run a failed batch photo by photo, to find out whose fault it was.
+
+    Returning a whole batch to the queue is right when the GPU is out of memory
+    and wrong when one file is truncated -- and the two are indistinguishable
+    from the outside. Being wrong about it is not a lost photo but a stalled
+    library: the next run claims the same sixteen, fails on the same one, and
+    puts them all back, forever. One corrupt file left 1171 photos unindexed
+    and every run reported "0 done" in under a second.
+
+    So the batch is retried singly. A photo that fails on its own is failed on
+    its own; anything that is not about the photo puts the untried remainder
+    back and ends the run, which is what the old code did for every case.
+
+    Returns None if the failure was systemic, else (vectors, jobs) for the
+    photos that did work -- possibly none of them.
+    """
+    ok_jobs, vectors = [], []
+    for job, blob in zip(jobs, payload, strict=True):
+        try:
+            vectors.append(embedder.embed_images([blob])[0])
+            ok_jobs.append(job)
+        except Exception as exc:
+            if not _photo_is_the_problem(exc):
+                done = {j["id"] for j in ok_jobs}
+                for untried in jobs:
+                    if untried["id"] not in done:
+                        repo.finish_job(conn, untried["id"], "pending", str(exc)[:500])
+                res.errors.append(f"batch of {len(jobs)}: {str(exc)[:160]}")
+                return None
+            repo.finish_job(conn, job["id"], "failed", str(exc)[:500])
+            res.failed += 1
+            res.errors.append(f"photo {job['photo_id']}: {str(exc)[:160]}")
+    return (np.stack(vectors) if ok_jobs else None), ok_jobs
+
+
 def run_embed(conn: sqlite3.Connection, cfg, embedder, limit: int = 2000,
               on_progress=None) -> StageResult:
     """Batched: the GPU is far better used on 16 images at once than on one."""
@@ -158,13 +207,18 @@ def run_embed(conn: sqlite3.Connection, cfg, embedder, limit: int = 2000,
 
         try:
             vectors = embedder.embed_images(payload)
-        except Exception as exc:
-            # A whole batch failing is usually OOM or a bad model, not bad data:
-            # return the jobs to the queue rather than burning all their attempts.
-            for job in keep:
-                repo.finish_job(conn, job["id"], "pending", str(exc)[:500])
-            res.errors.append(f"batch of {len(keep)}: {str(exc)[:160]}")
-            break
+        except Exception:
+            # Could be the GPU, could be one unreadable file among sixteen.
+            # Retrying singly is how to tell, and it costs a pass only over a
+            # batch that has already failed.
+            outcome = _embed_one_at_a_time(conn, embedder, keep, payload, res)
+            if outcome is None:
+                break                    # systemic: the jobs are back in the queue
+            vectors, keep = outcome
+            if not keep:
+                if on_progress:
+                    on_progress(res)
+                continue                 # every photo in this batch was broken
 
         with transaction(conn):
             for job, vec in zip(keep, vectors, strict=True):

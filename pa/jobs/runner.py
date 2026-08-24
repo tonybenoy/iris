@@ -180,6 +180,18 @@ class PipelineRunner:
             self._state["phase"] = phase
             self._state["note"] = note
 
+    def _summarise(self, stage: str) -> str:
+        """What a stage did, in its own terms. Clustering counts groups and
+        matches, not photos, so reporting "0 done, 0 failed" for it -- which is
+        what a shared counter gives -- says a successful run did nothing."""
+        r = self._state["results"].get(stage) or {}
+        if stage == "cluster":
+            return (f"{r.get('new_clusters', 0)} new groups, "
+                    f"{r.get('anchored', 0)} faces matched to someone named, "
+                    f"{r.get('unassigned', 0)} left over")
+        return (f"{r.get('done', 0)} done, {r.get('failed', 0)} failed, "
+                f"{r.get('skipped', 0)} waiting on a drive")
+
     @staticmethod
     def _say(message: str) -> None:
         print(f"[iris] {message}", file=sys.stderr, flush=True)
@@ -216,10 +228,8 @@ class PipelineRunner:
                 self._say(f"stage {stage}: starting")
                 began = time.monotonic()
                 self._run_stage(conn, cfg, stage, limit)
-                done = self._state["results"].get(stage, {})
                 self._say(f"stage {stage}: finished in {time.monotonic() - began:.0f}s "
-                          f"({done.get('done', 0)} done, {done.get('failed', 0)} failed, "
-                          f"{done.get('skipped', 0)} waiting on a drive)")
+                          f"({self._summarise(stage)})")
         except Cancelled:
             self._state["cancelled"] = True
             if conn is not None:
