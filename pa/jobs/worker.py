@@ -23,13 +23,42 @@ def _photo_path(conn: sqlite3.Connection, photo_id: int) -> Path | None:
     return scanner.resolve_file_path(conn, photo_id)
 
 
+def _claim_batches(conn: sqlite3.Connection, stage: str, batch: int, limit: int,
+                   res: StageResult):
+    """Yield batches of claimed jobs until the queue is empty or the limit is hit.
+
+    A job whose source is offline is put back as 'pending' rather than failed,
+    so that an unplugged drive costs nothing and the work resumes when it comes
+    back. That makes it immediately claimable again -- and since `skipped`
+    advances neither `done` nor `failed`, a stage with nothing but offline
+    photos left would claim the same job, put it back, and claim it again
+    forever, pinning a core and counting attempts into the millions.
+
+    Remembering what this run has already been handed ends it: once a batch
+    contains nothing new, there is no work left that this run can do.
+    """
+    seen: set[int] = set()
+    while res.done + res.failed < limit:
+        jobs = repo.claim_jobs(conn, stage, min(batch, limit - res.done - res.failed))
+        if not jobs:
+            return
+        fresh = [job for job in jobs if job["id"] not in seen]
+        # Claiming marks a job 'running'. Anything handed back a second time is
+        # not going to be processed, so put it back now -- left claimed, it
+        # would sit there looking like work in progress until a restart.
+        repeats = [job["id"] for job in jobs if job["id"] in seen]
+        if repeats:
+            repo.unclaim_jobs(conn, repeats)
+        if not fresh:
+            return
+        seen.update(job["id"] for job in fresh)
+        yield fresh
+
+
 def run_thumbs(conn: sqlite3.Connection, cfg, limit: int = 500,
                on_progress=None) -> StageResult:
     res = StageResult()
-    while True:
-        jobs = repo.claim_jobs(conn, "thumbs", min(50, limit - res.done - res.failed))
-        if not jobs:
-            break
+    for jobs in _claim_batches(conn, "thumbs", 50, limit, res):
         for job in jobs:
             path = _photo_path(conn, job["photo_id"])
             if path is None:
@@ -49,8 +78,6 @@ def run_thumbs(conn: sqlite3.Connection, cfg, limit: int = 500,
                 res.errors.append(f"{path.name}: {exc}")
             if on_progress:
                 on_progress(res)
-        if res.done + res.failed >= limit:
-            break
     return res
 
 
@@ -58,10 +85,8 @@ def run_caption(conn: sqlite3.Connection, cfg, provider, limit: int = 500,
                 on_progress=None) -> StageResult:
     res = StageResult()
     version = provider.model_version
-    while res.done + res.failed < limit:
-        jobs = repo.claim_jobs(conn, "caption", 1)  # one at a time: LM Studio serialises anyway
-        if not jobs:
-            break
+    # One at a time: LM Studio serialises anyway.
+    for jobs in _claim_batches(conn, "caption", 1, limit, res):
         job = jobs[0]
         photo_id = job["photo_id"]
         digest_row = conn.execute("SELECT blake3 FROM photo WHERE id=?", (photo_id,)).fetchone()
@@ -114,10 +139,7 @@ def run_embed(conn: sqlite3.Connection, cfg, embedder, limit: int = 2000,
     version = embedder.model_version
     batch_size = cfg.embed.batch_size
 
-    while res.done + res.failed < limit:
-        jobs = repo.claim_jobs(conn, "embed", min(batch_size, limit - res.done - res.failed))
-        if not jobs:
-            break
+    for jobs in _claim_batches(conn, "embed", batch_size, limit, res):
         payload, keep = [], []
         for job in jobs:
             src = _stage_source(conn, cfg, job["photo_id"])
@@ -166,10 +188,7 @@ def run_faces(conn: sqlite3.Connection, cfg, analyzer, limit: int = 2000,
     res = StageResult()
     version = analyzer.model_version
 
-    while res.done + res.failed < limit:
-        jobs = repo.claim_jobs(conn, "faces", min(32, limit - res.done - res.failed))
-        if not jobs:
-            break
+    for jobs in _claim_batches(conn, "faces", 32, limit, res):
         for job in jobs:
             photo_id = job["photo_id"]
             src = _stage_source(conn, cfg, photo_id)

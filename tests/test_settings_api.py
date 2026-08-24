@@ -206,3 +206,39 @@ def _wait_for_idle(client, tries=100):
             return
         time.sleep(0.05)
     raise AssertionError("pipeline never went idle")
+
+
+def test_a_stage_with_only_offline_photos_still_finishes(cfg):
+    """A photo whose drive is unplugged is put back in the queue rather than
+    failed, which makes it immediately claimable again. Nothing else advanced
+    the loop, so a run with no reachable photos left spun forever -- claim, put
+    back, claim -- pinning a core and counting attempts into the thousands.
+    """
+    import threading
+
+    from pa.db.connection import init_db
+    from pa.jobs import worker
+
+    conn = init_db(cfg.paths.db_path)
+    conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (1,'gone',0)")
+    conn.execute("INSERT INTO job (photo_id, stage, state, priority, created_at) "
+                 "VALUES (1,'thumbs','pending',100,0)")
+    conn.commit()
+
+    res = {}
+    # In a thread with a deadline: the bug's symptom is not finishing, and a
+    # test that reproduces it by hanging the suite is no use to anyone.
+    run = threading.Thread(
+        target=lambda: res.update(out=worker.run_thumbs(conn, cfg, limit=50)),
+        daemon=True)
+    run.start()
+    run.join(10)
+    assert not run.is_alive(), "run_thumbs never returned: it is spinning on an offline photo"
+    assert res["out"].done == 0 and res["out"].skipped >= 1
+
+    row = conn.execute("SELECT state, attempts FROM job WHERE photo_id=1").fetchone()
+    # Back in the queue, not left mid-claim: a job still marked 'running' when
+    # nothing is running reads as work in progress on the Library tab, and only
+    # a restart clears it.
+    assert row["state"] == "pending"
+    assert row["attempts"] <= 2

@@ -189,6 +189,19 @@ def finish_job(conn: sqlite3.Connection, job_id: int, state: str,
         (state, error, model_version, now(), job_id))
 
 
+def unclaim_jobs(conn: sqlite3.Connection, job_ids: list[int]) -> None:
+    """Undo a claim on jobs that were taken but never processed.
+
+    Exactly reverses claim_jobs, attempts included: a job nobody looked at has
+    not had an attempt, and attempts is what decides whether a job is ever
+    picked up again after a crash.
+    """
+    conn.executemany(
+        "UPDATE job SET state='pending', started_at=NULL, "
+        "attempts=MAX(attempts - 1, 0) WHERE id=?",
+        [(job_id,) for job_id in job_ids])
+
+
 def requeue_stale(conn: sqlite3.Connection) -> int:
     """Jobs left 'running' by a killed process are pending again on restart."""
     cur = conn.execute(
