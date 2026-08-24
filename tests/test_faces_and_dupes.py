@@ -273,3 +273,77 @@ def test_face_crop_survives_a_box_it_cannot_place(client, tmp_path):
     conn.commit()
 
     assert client.get("/api/face/1").status_code == 200
+
+
+# ------------------------------------------------------- suggesting a name
+def _unit(seed: int) -> np.ndarray:
+    v = np.random.default_rng(seed).normal(size=512).astype(np.float32)
+    return v / np.linalg.norm(v)
+
+
+def _face_vectors(conn, vectors: dict[int, np.ndarray]) -> None:
+    for face_id, vec in vectors.items():
+        conn.execute("UPDATE face SET embedding=? WHERE id=?",
+                     (vec.astype(np.float32).tobytes(), face_id))
+    conn.commit()
+
+
+def test_a_group_that_resembles_a_named_person_is_suggested(client, tmp_path):
+    """Recognising a name you are shown is far easier than recalling one from a
+    face crop, and it is what stops one person being entered twice."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    sarah, stranger = _unit(1), _unit(2)
+    _face_vectors(conn, {1: sarah, 2: sarah, 3: stranger})
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+
+    # A third group, half-way between the two: too unsure for clustering to
+    # attach on its own, which is exactly the case a suggestion is for.
+    mix = (sarah + stranger) / 2
+    conn.execute(
+        """INSERT INTO face (id, photo_id, cluster_id, bbox_x, bbox_y, bbox_w, bbox_h,
+                             det_score, embedding, model, created_at)
+           VALUES (11,1,11,0,0,10,10,0.9,?,'test',0)""",
+        ((mix / np.linalg.norm(mix)).astype(np.float32).tobytes(),))
+    conn.commit()
+
+    by_id = {c["cluster_id"]: c for c in client.get("/api/clusters").json()["clusters"]}
+    assert [g["name"] for g in by_id[11]["suggestions"]] == ["Sarah"]
+    assert by_id[11]["suggestions"][0]["score"] > 0.5
+    assert by_id[9]["suggestions"] == [], "an unrelated face must not be guessed at"
+
+
+def test_nothing_is_suggested_before_anyone_is_named(client):
+    for c in client.get("/api/clusters").json()["clusters"]:
+        assert c["suggestions"] == []
+
+
+def test_a_weak_resemblance_is_left_alone(client, tmp_path):
+    """The floor is a setting because the cost of a wrong guess is a whole group
+    filed under the wrong person."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    cfg = cfgmod._cfg
+    conn = init_db(cfg.paths.db_path)
+    _face_vectors(conn, {1: _unit(1), 2: _unit(1), 3: _unit(2)})
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+
+    cfg.face.suggest_min_similarity = 0.99
+    assert client.get("/api/clusters").json()["clusters"][0]["suggestions"] == []
+    cfg.face.suggest_min_similarity = -1.0
+    assert client.get("/api/clusters").json()["clusters"][0]["suggestions"] != []
+
+
+# ------------------------------------------------ seeing a group as photos
+def test_a_group_lists_the_photos_its_faces_came_from(client):
+    """Five crops are enough to say "that is Sarah" and not enough to notice
+    that the group is a face on a poster."""
+    d = client.get("/api/clusters/7/faces").json()
+    assert d["cluster_id"] == 7
+    assert [f["id"] for f in d["faces"]] == [1, 2]
+    assert all(f["photo_id"] == 1 and f["blake3"] == "hash1" for f in d["faces"])
+
+
+def test_an_unknown_group_has_no_photos(client):
+    assert client.get("/api/clusters/999/faces").status_code == 404

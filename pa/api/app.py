@@ -414,7 +414,39 @@ def create_app() -> FastAPI:
                 (r["cluster_id"],)).fetchall()
             out.append({"cluster_id": r["cluster_id"], "count": r["n"],
                         "faces": [dict(f) for f in faces]})
+
+        # Recognising a name you are shown beats recalling one from a face crop,
+        # and it is what keeps one person from being entered twice under two
+        # spellings.
+        from pa.faces.cluster import suggest_people
+        guesses = suggest_people(conn, cfg, [c["cluster_id"] for c in out])
+        for c in out:
+            c["suggestions"] = guesses.get(c["cluster_id"], [])
         return {"clusters": out}
+
+    @app.get("/api/clusters/{cluster_id}/faces")
+    def api_cluster_faces(cluster_id: int, limit: int = 200) -> Any:
+        """Every face in one group, with the photo each came from.
+
+        The naming queue shows five crops, which is enough to say "that is
+        Sarah" and not enough for anything else. Detection is imperfect: a group
+        can be a pattern on a shirt, a face on a poster, or two people the
+        clusterer ran together -- and none of that is visible until you can see
+        the whole photo a crop was cut out of.
+        """
+        conn = db()
+        rows = conn.execute(
+            f"""SELECT f.id, f.photo_id, f.det_score, p.blake3, p.taken_at,
+                      (SELECT a.caption FROM annotation a WHERE a.photo_id=p.id
+                       ORDER BY {ANNOTATION_ORDER} LIMIT 1) AS caption,
+                      (SELECT fi.filename FROM file fi WHERE fi.photo_id=p.id LIMIT 1)
+                          AS filename
+               FROM face f JOIN photo p ON p.id=f.photo_id
+               WHERE f.cluster_id=? ORDER BY f.det_score DESC LIMIT ?""",
+            (cluster_id, limit)).fetchall()
+        if not rows:
+            raise HTTPException(404, "no such group, or it is already gone")
+        return {"cluster_id": cluster_id, "faces": [dict(r) for r in rows]}
 
     @app.post("/api/clusters/{cluster_id}/name")
     def api_name_cluster(cluster_id: int, body: NameIn) -> Any:

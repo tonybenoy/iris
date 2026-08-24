@@ -28,7 +28,7 @@ const when = (t) => t ? new Date(t * 1000).toLocaleDateString(undefined,
   { year: 'numeric', month: 'short', day: 'numeric' }) : '';
 
 const state = {
-  results: [], q: '', offset: 0, loading: false, done: false, cursor: -1,
+  results: [], lb: null, q: '', offset: 0, loading: false, done: false, cursor: -1,
   group: localStorage.getItem('pa.group') || 'month',
   sort: localStorage.getItem('pa.sort') || 'newest',
 };
@@ -168,7 +168,7 @@ function cell(p, i) {
     el.classList.add('nothumb');
     el.insertAdjacentHTML('beforeend', `<span>${esc(p.filename || 'no thumbnail')}</span>`);
   });
-  el.addEventListener('click', () => openLightbox(i));
+  el.addEventListener('click', () => openLightbox(i, state.results));
   return el;
 }
 
@@ -248,8 +248,13 @@ function showPhoto(p) {
   img.src = `/api/thumb/${p.blake3}/view`;
 }
 
-async function openLightbox(i) {
-  const p = state.results[i];
+/* `list` is whatever set of photos the lightbox is paging through. It is the
+   search results almost always, but the People screen opens a face group this
+   way too, and arrowing through the group is most of what makes a group
+   readable. Omit it to stay on the current list -- a redraw after an edit. */
+async function openLightbox(i, list) {
+  if (list) state.lb = list;
+  const p = (state.lb || state.results)[i];
   if (!p) return;
   state.cursor = i;
   state.detail = null;   // belongs to the previous photo until the fetch lands
@@ -427,7 +432,7 @@ function wireTagEditor(photoId, d) {
 const closeLb = () => { $('#lightbox').hidden = true; $('#lb-img').src = ''; };
 const step = (d) => {
   const n = state.cursor + d;
-  if (n >= 0 && n < state.results.length) openLightbox(n);
+  if (n >= 0 && n < (state.lb || state.results).length) openLightbox(n);
 };
 $('.lb-close').addEventListener('click', closeLb);
 $('.lb-nav.prev').addEventListener('click', () => step(-1));
@@ -507,6 +512,7 @@ async function loadPeople() {
     }));
 
   $('#unnamed-h').hidden = cl.clusters.length === 0;
+  clusterPhotos.clear();   // the queue has been rebuilt; cached groups are stale
   $('#clusters').innerHTML = cl.clusters.map(c =>
     `<div class="cluster" data-id="${c.cluster_id}">
        <div class="clusterhd">
@@ -515,8 +521,9 @@ async function loadPeople() {
                  title="Someone you do not need to name">Ignore</button>
        </div>
        <div class="n">${c.count} face${c.count === 1 ? '' : 's'}</div>
-       <div class="faces">${c.faces.slice(0, 5).map(f =>
-         `<div><img src="/api/face/${f.id}" alt=""></div>`).join('')}</div>
+       <div class="faces" data-mode="faces">${faceTiles(c.faces.slice(0, 5))}</div>
+       <button class="seephotos" data-see="${c.cluster_id}">See the photos</button>
+       ${guessRow(c.suggestions)}
        <form><input placeholder="Who is this?" aria-label="Name this person"
                     list="known-people" autocomplete="off"><button>Name</button></form>
      </div>`).join('');
@@ -552,6 +559,105 @@ async function loadPeople() {
       loadPeople();  // keeps focus flowing to the next unnamed cluster
     }));
 }
+
+/* A crop is enough to say "that is Sarah" and not enough for anything else.
+   Detection is imperfect and clustering is imperfect: a group can turn out to
+   be a face on a poster, a pattern on a shirt, or two people run together --
+   and none of that shows until you can see the photo the crop came from. So
+   every tile opens the whole photo, and the lightbox pages through the group
+   rather than through the search results. */
+const clusterPhotos = new Map();
+
+const faceTiles = (faces) => faces.map(f =>
+  `<button class="tile" data-photo="${f.photo_id}"
+           title="Open the photo this face came from">
+     <img src="/api/face/${f.id}" alt="" loading="lazy"></button>`).join('');
+
+const photoTiles = (photos) => photos.map(p =>
+  `<button class="tile shot" data-photo="${p.id}"
+           title="${esc(p.caption || p.filename || 'Open this photo')}">
+     <img src="/api/thumb/${esc(p.blake3)}/grid" alt="" loading="lazy"></button>`).join('');
+
+/* Suggestions are the groups the clusterer was NOT sure enough to attach on its
+   own, so they are offered as one click rather than applied silently. */
+function guessRow(list) {
+  if (!list || !list.length) return '';
+  return '<div class="guesses"><span>Looks like</span>' + list.map(g =>
+    `<button class="guess" data-guess="${esc(g.name)}"
+             title="${Math.round(g.score * 100)}% alike to the faces you named ` +
+    `${esc(g.name)}. Click to name this group that.">${esc(g.name)}</button>`).join('') +
+    '</div>';
+}
+
+/* One photo per tile even when three faces in the group came from it: the
+   group is being shown as photos here, not as detections. */
+async function photosOf(clusterId) {
+  if (!clusterPhotos.has(clusterId)) {
+    const d = await api(`/api/clusters/${clusterId}/faces`);
+    const byPhoto = new Map();
+    for (const f of d.faces)
+      if (!byPhoto.has(f.photo_id))
+        byPhoto.set(f.photo_id, { id: f.photo_id, blake3: f.blake3,
+                                  caption: f.caption, filename: f.filename });
+    clusterPhotos.set(clusterId, [...byPhoto.values()]);
+  }
+  return clusterPhotos.get(clusterId);
+}
+
+/* A photo that has not been through the thumbnail stage has no preview to
+   show. Capture phase, because `error` does not bubble. */
+$('#clusters').addEventListener('error', (e) => {
+  if (e.target.matches('.tile img')) e.target.closest('.tile').classList.add('nothumb');
+}, true);
+
+/* Delegated: cluster cards are rebuilt on every redraw of the queue. */
+$('#clusters').addEventListener('click', async (e) => {
+  const guess = e.target.closest('.guess');
+  if (guess) {
+    const card = guess.closest('.cluster');
+    guess.disabled = true;
+    await api(`/api/clusters/${card.dataset.id}/name`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: guess.dataset.guess })
+    }).catch(err => alert(err.message));
+    loadPeople();
+    return;
+  }
+
+  const see = e.target.closest('[data-see]');
+  if (see) {
+    const card = see.closest('.cluster');
+    const strip = card.querySelector('.faces');
+    if (strip.dataset.mode === 'photos') {
+      strip.dataset.mode = 'faces';
+      strip.innerHTML = strip._crops;
+      see.textContent = 'See the photos';
+      return;
+    }
+    see.disabled = true;
+    try {
+      const photos = await photosOf(+card.dataset.id);
+      strip._crops = strip.innerHTML;   // put back verbatim when toggled again
+      strip.dataset.mode = 'photos';
+      strip.innerHTML = photoTiles(photos);
+      see.textContent = 'See the faces';
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      see.disabled = false;
+    }
+    return;
+  }
+
+  const tile = e.target.closest('.tile');
+  if (tile) {
+    const card = tile.closest('.cluster');
+    const photos = await photosOf(+card.dataset.id).catch(() => null);
+    if (!photos) return;
+    const at = photos.findIndex(p => p.id === +tile.dataset.photo);
+    openLightbox(Math.max(at, 0), photos);
+  }
+});
 
 /* Clustering splits one person across several groups whenever lighting or angle
    varies, so merging is the most common correction on this screen.
@@ -1112,6 +1218,10 @@ const SETTINGS = [
         help: 'Lower splits one person into more groups; higher starts merging strangers.' },
       { k: 'min_cluster_size', label: 'Smallest group', type: 'number',
         help: 'How many faces it takes before a group is worth offering you to name.' },
+      { k: 'suggest_min_similarity', label: 'Suggest a name above', type: 'number', step: 0.05,
+        help: 'How alike an unnamed group must be to someone you already named ' +
+              'before the People screen offers them as a guess. Lower gives more ' +
+              'guesses and more wrong ones.' },
     ] },
   { key: 'thumbs', title: 'Thumbnails',
     blurb: 'Cached previews. These are what keeps the library browsable with the ' +

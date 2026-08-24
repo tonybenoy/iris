@@ -471,3 +471,29 @@ button.ghostbtn:disabled{opacity:.4;cursor:not-allowed}
 .facelb:hover .ig{opacity:1}
 .facelb .ig:hover{background:var(--lex)}
 .mergebar .ghost{white-space:nowrap}
+
+/* ------------------------------------- seeing a group, and guessing its name */
+/* `.cluster button` is the filled "Name" button and outranks a bare class, so
+   everything here is qualified with .cluster to get out from under it. */
+.cluster .faces .tile{width:52px;height:52px;flex:none;padding:0;overflow:hidden;
+  border:1px solid transparent;border-radius:5px;background:var(--raised);cursor:zoom-in}
+.cluster .faces .tile.shot{width:86px;height:60px}
+.cluster .faces .tile:hover{border-color:var(--sem)}
+.cluster .faces .tile img{width:100%;height:100%;object-fit:cover;display:block}
+.cluster .faces .tile.nothumb img{display:none}
+.cluster .faces .tile.nothumb::after{content:"no preview";font-size:8px;color:var(--faint)}
+/* Crops are one row; whole photos are worth wrapping onto more. */
+.cluster .faces[data-mode="photos"]{flex-wrap:wrap;overflow:visible}
+.cluster .seephotos{background:none;color:var(--dim);font-size:11.5px;font-weight:400;
+  border:1px solid var(--line);border-radius:5px;padding:4px 9px;margin-bottom:11px}
+.cluster .seephotos:hover{color:var(--text);border-color:var(--dim)}
+.cluster .seephotos:disabled{opacity:.5;cursor:progress}
+
+.cluster .guesses{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px}
+.cluster .guesses span{font-family:"JetBrains Mono",monospace;font-size:11px;
+  color:var(--faint);text-transform:uppercase;letter-spacing:.05em}
+/* Blue, the semantic-match accent: this is the machine's guess, not your word. */
+.cluster .guess{background:none;border:1px solid var(--sem);color:var(--sem);
+  border-radius:999px;padding:3px 11px;font-size:12.5px;font-weight:500}
+.cluster .guess:hover{background:var(--sem);color:var(--canvas)}
+.cluster .guess:disabled{opacity:.5}

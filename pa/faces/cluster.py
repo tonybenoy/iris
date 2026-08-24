@@ -155,3 +155,52 @@ def name_cluster(conn: sqlite3.Connection, cluster_id: int, name: str) -> int:
         repo.reindex_fts(conn, f["photo_id"])
     conn.commit()
     return len(faces)
+
+
+def suggest_people(conn: sqlite3.Connection, cfg, cluster_ids: list[int],
+                   top: int = 2) -> dict[int, list[dict]]:
+    """Guess which already-named person each proposed group might be.
+
+    Naming is the same work whether you type it or pick it, but recognising a
+    name you are shown is far easier than recalling one from a face crop -- and
+    it is what stops the same person being entered twice under two spellings.
+
+    These are only the groups clustering was *not* confident enough to attach on
+    its own: anything above 1 - cluster_eps was already assigned by
+    assign_to_known and never reaches the naming queue. So a suggestion is by
+    definition a judgement call, and is offered rather than applied.
+    """
+    if not cluster_ids:
+        return {}
+    centroids = person_centroids(conn)
+    names = {r["id"]: r["name"] for r in
+             conn.execute("SELECT id, name FROM person WHERE name IS NOT NULL")}
+    people = [pid for pid in centroids if names.get(pid)]
+    if not people:
+        return {}
+    matrix = np.stack([centroids[pid] for pid in people])
+
+    marks = ",".join("?" * len(cluster_ids))
+    grouped: dict[int, list[np.ndarray]] = {}
+    for row in conn.execute(
+            f"SELECT cluster_id, embedding FROM face "
+            f"WHERE rejected=0 AND cluster_id IN ({marks})", list(cluster_ids)):
+        grouped.setdefault(row["cluster_id"], []).append(
+            np.frombuffer(row["embedding"], dtype=np.float32))
+
+    floor = cfg.face.suggest_min_similarity
+    out: dict[int, list[dict]] = {}
+    for cid, vecs in grouped.items():
+        # The group's centroid rather than its best single face: one blurred
+        # profile shot resembling somebody is not evidence about the group.
+        centre = np.mean(np.stack(vecs), axis=0)
+        centre /= max(float(np.linalg.norm(centre)), 1e-12)
+        sims = matrix @ centre
+        picks = [
+            {"person_id": people[i], "name": names[people[i]],
+             "score": round(float(sims[i]), 3)}
+            for i in np.argsort(sims)[::-1][:top] if sims[i] >= floor
+        ]
+        if picks:
+            out[cid] = picks
+    return out

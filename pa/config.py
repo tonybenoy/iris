@@ -54,6 +54,11 @@ class FaceConfig(BaseModel):
     # Cosine distance below which two ArcFace embeddings are the same person.
     cluster_eps: float = 0.42
     min_cluster_size: int = 3
+    # Similarity at which an unnamed group is worth *offering* as somebody you
+    # already named. Deliberately below the automatic threshold (1 - cluster_eps):
+    # anything above that was already attached without asking, so a suggestion
+    # only ever concerns the band that is too uncertain to decide for you.
+    suggest_min_similarity: float = 0.35
 
 
 class SidecarConfig(BaseModel):
@@ -192,6 +197,10 @@ min_face_px = {face_min_face_px}   # ignore faces smaller than this, they cluste
 # Lower = stricter, splits people into more groups. Higher = merges strangers.
 cluster_eps = {face_cluster_eps}
 min_cluster_size = {face_min_cluster_size}
+
+# How alike an unnamed group must be to someone already named before the People
+# screen offers them as a guess. Lower to get more guesses and more wrong ones.
+suggest_min_similarity = {face_suggest_min_similarity}
 
 [thumbs]
 grid_px = {thumbs_grid_px}
