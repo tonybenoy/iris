@@ -346,44 +346,21 @@ def sidecar_export(
     tree, so your photo folders are left untouched. Use --beside to put them
     next to the originals, which is what Lightroom and digiKam read directly.
     """
-    from pa.ingest.scanner import resolve_file_path
-    from pa.sidecar import xmp
+    from pa.sidecar import bulk
 
     conn, cfg = _db()
     if beside:
         cfg = cfg.model_copy(deep=True)
         cfg.sidecar.location = "beside"
-    sql = """SELECT DISTINCT p.id FROM photo p JOIN file f ON f.photo_id=p.id
-             WHERE f.state='present'"""
-    args: list = []
-    if root_id is not None:
-        sql += " AND f.root_id=?"
-        args.append(root_id)
-    sql += " ORDER BY p.id"
-    if limit:
-        sql += " LIMIT ?"
-        args.append(limit)
-
-    written = skipped = offline = 0
     where = "beside your photos" if beside else str(cfg.paths.sidecars_dir)
-    rows = conn.execute(sql, args).fetchall()
     with console.status("writing sidecars...") as st:
-        for i, row in enumerate(rows, 1):
-            path = resolve_file_path(conn, row["id"])
-            if path is None:
-                offline += 1
-                continue
-            if not overwrite and xmp.resolve_path(cfg, conn, row["id"], path).exists():
-                skipped += 1
-                continue
-            try:
-                written += 1 if xmp.write(conn, row["id"], path, cfg) else 0
-            except OSError as exc:
-                console.print(f"  [red]{path.name}: {exc}[/]")
-            if i % 20 == 0:
-                st.update(f"{i}/{len(rows)} - wrote {written}")
-    console.print(f"wrote [green]{written}[/] sidecars, skipped [dim]{skipped}[/] "
-                  f"existing, [yellow]{offline}[/] on disconnected drives")
+        res = bulk.export(conn, cfg, root_id, limit, overwrite,
+                          on_progress=lambda r, i: st.update(
+                              f"{i}/{r.total} - wrote {r.written}"))
+    for err in res.errors[:5]:
+        console.print(f"  [red]{err}[/]")
+    console.print(f"wrote [green]{res.written}[/] sidecars, skipped [dim]{res.skipped}[/] "
+                  f"existing, [yellow]{res.offline}[/] on disconnected drives")
     console.print(f"[dim]location: {where}[/]")
     conn.close()
 
@@ -393,27 +370,12 @@ def sidecar_import(
     root_id: int = typer.Option(None, "--root", help="Only this root id."),
 ) -> None:
     """Read keywords and ratings from existing .xmp files into the library."""
-    from pa.ingest.scanner import resolve_file_path
-    from pa.sidecar import xmp
+    from pa.sidecar import bulk
 
     conn, cfg = _db()
-    sql = """SELECT DISTINCT p.id FROM photo p JOIN file f ON f.photo_id=p.id
-             WHERE f.state='present'"""
-    args: list = []
-    if root_id is not None:
-        sql += " AND f.root_id=?"
-        args.append(root_id)
-    found = tags = 0
-    for row in conn.execute(sql, args).fetchall():
-        path = resolve_file_path(conn, row["id"])
-        if path is None:
-            continue
-        sc = xmp.read_into(conn, row["id"], path, cfg)
-        if sc is not None:
-            found += 1
-            tags += len(sc.tags)
-    conn.commit()
-    console.print(f"read [green]{found}[/] sidecars, [cyan]{tags}[/] keywords imported")
+    res = bulk.read_back(conn, cfg, root_id)
+    console.print(f"read [green]{res.found}[/] sidecars, "
+                  f"[cyan]{res.tags}[/] keywords imported")
     conn.close()
 
 
@@ -581,72 +543,22 @@ def config_edit() -> None:
     subprocess.call([editor, str(CONFIG_PATH)])
 
 
-def _wsl_host_ip() -> str | None:
-    """The Windows host's address as seen from inside WSL, or None if not WSL."""
-    try:
-        if "microsoft" not in Path("/proc/version").read_text().lower():
-            return None
-    except OSError:
-        return None
-    try:
-        # The default route's gateway is the Windows host on WSL2 NAT networking.
-        import subprocess
-        out = subprocess.run(["ip", "route", "show", "default"],
-                             capture_output=True, text=True, timeout=5).stdout
-        parts = out.split()
-        return parts[parts.index("via") + 1] if "via" in parts else None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-
-
 @config_app.command("check")
 def config_check() -> None:
     """Test that the configured models are actually reachable."""
     from pa.config import get_config
-    cfg = get_config()
-    ok = True
+    from pa.providers import health
 
-    from pa.providers.registry import get_captioner
-    try:
-        good, msg = get_captioner(cfg).health()
-    except Exception as exc:
-        good, msg = False, str(exc)
-    console.print(f"{'[green]OK  [/]' if good else '[red]FAIL[/]'} caption   "
-                  f"{cfg.caption.model} @ {cfg.caption.base_url}")
-    if not good:
-        console.print(f"       [dim]{msg}[/]")
-        # Under WSL, localhost is the Linux side. A model server running on the
-        # Windows host is reachable at the host's IP, not 127.0.0.1 -- and this
-        # is the single most likely reason a fresh install cannot connect.
-        if "127.0.0.1" in cfg.caption.base_url or "localhost" in cfg.caption.base_url:
-            host_ip = _wsl_host_ip()
-            if host_ip:
-                console.print("       [yellow]Running under WSL:[/] localhost is not the "
-                              "Windows host.")
-                console.print(f"       If the model server runs on Windows, try "
-                              f"[bold]http://{host_ip}:1234[/]")
-                console.print("       [dim]pa config edit  ->  [caption] base_url[/]")
-        ok = False
-
-    try:
-        import torch
-        cuda = torch.cuda.is_available()
-        console.print(f"[green]OK  [/] gpu       "
-                      f"{torch.cuda.get_device_name(0) if cuda else 'no CUDA - will use CPU'}")
-    except ImportError:
-        console.print("[yellow]WARN[/] gpu       torch not installed "
-                      "(install with: uv sync --extra ml)")
-
-    try:
-        import onnxruntime
-        provs = onnxruntime.get_available_providers()
-        gpu = "CUDAExecutionProvider" in provs
-        console.print(f"{'[green]OK  [/]' if gpu else '[yellow]WARN[/]'} faces     "
-                      f"{'GPU' if gpu else 'CPU only - face detection ~10x slower'}")
-    except ImportError:
-        console.print("[yellow]WARN[/] faces     onnxruntime not installed")
-
-    raise typer.Exit(0 if ok else 1)
+    rep = health.report(get_config())
+    badge = {"ok": "[green]OK  [/]", "warn": "[yellow]WARN[/]", "fail": "[red]FAIL[/]"}
+    for check in rep["checks"]:
+        console.print(f"{badge[check['level']]} {check['id']:<9} {check['detail']}")
+        if check["message"]:
+            console.print(f"       [dim]{check['message']}[/]")
+        if check["hint"]:
+            console.print(f"       [yellow]{check['hint']}[/]")
+            console.print("       [dim]pa config edit  ->  [caption] base_url[/]")
+    raise typer.Exit(0 if rep["ok"] else 1)
 
 
 @app.command()

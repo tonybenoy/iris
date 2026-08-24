@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Iris</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -26,6 +27,7 @@
     <button data-view="places">Places</button>
     <button data-view="dupes">Duplicates</button>
     <button data-view="library">Library</button>
+    <button data-view="settings">Settings</button>
   </nav>
 </header>
 
@@ -91,11 +93,96 @@
       <p>Folders you have indexed. Your photos are never moved or changed.</p>
     </div>
     <div id="stats" class="stats"></div>
+
+    <h3 class="sub">Indexing</h3>
+    <div class="panel" id="pipeline">
+      <div class="runbar">
+        <button id="run-all" class="primary">Index everything</button>
+        <button id="run-cancel" class="ghostbtn danger" hidden>Stop</button>
+        <span class="runstate" id="runstate"></span>
+      </div>
+      <div class="runprog" id="runprog" hidden><i></i></div>
+      <div class="stages" id="stages"></div>
+      <p class="note" id="runnote"></p>
+    </div>
+
     <div class="roots-head">
       <h3 class="sub">Folders</h3>
       <button id="addroot" class="primary">Add folder</button>
     </div>
     <div id="roots" class="roots"></div>
+  </section>
+
+  <section id="settings-view" hidden>
+    <div class="people-head">
+      <h2>Settings</h2>
+      <p>Everything the indexer and search use. Saved to your config file, and
+         applied to the running server straight away unless noted.</p>
+    </div>
+
+    <div class="panel">
+      <div class="roots-head" style="margin:0">
+        <h3 class="sub" style="margin:0">Is everything reachable?</h3>
+        <button id="recheck" class="ghostbtn">Check again</button>
+      </div>
+      <div id="health" class="health"></div>
+    </div>
+
+    <div id="settings-form"></div>
+
+    <h3 class="sub">Maintenance</h3>
+    <div class="panel">
+      <div class="tools">
+        <div class="tool">
+          <div><b>Export XMP sidecars</b>
+            <p>Write captions, keywords and named faces where Lightroom and
+               digiKam can read them. Originals are never touched.</p></div>
+          <div class="tool-acts">
+            <label class="toggle"><input type="checkbox" id="sc-beside"> Beside the photos</label>
+            <label class="toggle"><input type="checkbox" id="sc-overwrite"> Overwrite existing</label>
+            <button class="ghostbtn" data-tool="sidecar-export">Export</button>
+          </div>
+        </div>
+        <div class="tool">
+          <div><b>Import XMP sidecars</b>
+            <p>Read keywords and ratings from existing .xmp files. Added as your
+               own tags; captions and faces are left alone.</p></div>
+          <div class="tool-acts">
+            <button class="ghostbtn" data-tool="sidecar-import">Import</button>
+          </div>
+        </div>
+        <div class="tool">
+          <div><b>Prune missing photos</b>
+            <p>Drop photos with no readable copy left anywhere. Files on a
+               disconnected drive count as offline, not missing, and are kept.</p></div>
+          <div class="tool-acts">
+            <label class="toggle"><input type="checkbox" id="pr-keep"> Only removed folders</label>
+            <button class="ghostbtn danger" data-tool="prune">Prune</button>
+          </div>
+        </div>
+        <div class="tool">
+          <div><b>Rebuild thumbnails</b>
+            <p>Throws the preview cache away and makes it again at the current
+               size and format. Changing those settings needs this — a plain
+               re-run keeps every thumbnail it already has.</p></div>
+          <div class="tool-acts">
+            <button class="ghostbtn danger" data-tool="rebuild-thumbs">Rebuild</button>
+          </div>
+        </div>
+        <div class="tool">
+          <div><b>Retry failed work</b>
+            <p>Failures are usually a drive that was unplugged or a model server
+               that was down. This puts them back in the queue.</p></div>
+          <div class="tool-acts">
+            <button class="ghostbtn" data-tool="retry">Retry all failed</button>
+          </div>
+        </div>
+      </div>
+      <p class="note" id="toolnote"></p>
+    </div>
+
+    <h3 class="sub">Where things live</h3>
+    <div class="panel"><div id="paths" class="paths"></div></div>
   </section>
 
   <div id="picker" class="modal" hidden>

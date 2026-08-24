@@ -28,12 +28,28 @@ environment once per shell:
 Then:
 
 ```bash
+pa serve                            # http://127.0.0.1:8420
+```
+
+Everything else can be done from there: add folders, edit every setting, and
+run the indexer. **Settings** holds the models, devices and thresholds, checks
+that the model server and GPU are reachable, and offers sidecar export, prune
+and a thumbnail rebuild. **Library** shows each pipeline stage with what it has
+waiting, a Run button per stage, and live progress.
+
+Adding a folder scans it and then indexes thumbnails on its own, so photos show
+up without being told to. Widen that with `auto_process` (Settings → Server and
+indexing) if you want meaning search and faces to follow automatically too.
+
+The CLI does the same things, and is the better option for a first run over a
+large library, where you want it in a terminal you can watch:
+
+```bash
 pa config init                      # write a commented settings file
 pa config check                     # confirm the model server and GPU are reachable
 pa root add /mnt/d/Photos/2024      # register a folder (any drive)
 pa process                          # thumbnails, embeddings, faces, captions
 pa people cluster                   # group faces
-pa serve                            # http://127.0.0.1:8420
 pa search "birds on a lake"         # or search from the terminal
 ```
 
@@ -134,9 +150,15 @@ pa config path      # where the file lives
 pa init             # create the database and print every path it uses
 ```
 
+The **Settings** tab edits all of this in the browser, writing the same file and
+applying most changes to the running server immediately. Fields that cannot take
+effect until a restart, or that need a stage re-run to apply to photos already
+indexed, say so next to the field.
+
 The file lives at `~/.local/share/photo_anotater/config.toml`
 (`%LOCALAPPDATA%\photo_anotater\config.toml` on Windows). Every value is
-optional — delete a line to fall back to the default.
+optional — delete a line to fall back to the default. Editing it by hand and
+editing it in the UI are interchangeable; comments survive a save from either.
 
 ```toml
 [caption]
@@ -160,7 +182,13 @@ location = "app"                         # or "beside"
 [server]
 host = "127.0.0.1"                       # this machine only
 port = 8420
+auto_process = ["thumbs"]                # stages to run by themselves after a scan
 ```
+
+`auto_process` is what makes a scan produce something visible. A scan only
+queues work; these are the stages that then run without being asked. Thumbnails
+are the default because they need no GPU and no model server, and theirs is the
+one absence you see on every tile. `[]` turns it off.
 
 **Running under WSL?** `127.0.0.1` is the Linux side, not Windows. If LM Studio
 runs on the Windows host, point `base_url` at the host's IP —
@@ -268,6 +296,11 @@ pa process --limit 500        # bounded batch
 Stages run in order `thumbs → embed → faces → caption`. The first three are fast
 (~0.1s/photo together) and make a folder searchable almost immediately; captions
 are the slow one and can run whenever.
+
+The Library tab does all of this too, one button per stage, with progress and a
+Stop that leaves finished work finished. Changing a thumbnail size or format
+needs Settings → Maintenance → Rebuild thumbnails rather than a plain re-run:
+the stage skips any thumbnail whose file already exists.
 
 ## People
 

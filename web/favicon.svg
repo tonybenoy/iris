@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- The header's brand mark at tab size: three bands for the three engines
+       search fuses -- amber for a literal word match, blue for a semantic one,
+       grey for a structured filter. Same idea as .mark in app.css, drawn with
+       rects instead of gradients so it stays crisp at 16px. -->
+  <rect width="32" height="32" rx="7" fill="#0B0B0C"/>
+  <rect x="7" y="7"  width="18" height="5.33" rx="1" fill="#E8B84B"/>
+  <rect x="7" y="13.33" width="18" height="5.33" rx="1" fill="#6FA8FF"/>
+  <rect x="7" y="19.67" width="18" height="5.33" rx="1" fill="#6E6E78"/>
+</svg>

@@ -1,6 +1,7 @@
 """FastAPI backend. Serves the SPA and a small JSON API over the library."""
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
@@ -17,6 +18,8 @@ from pa.db import repo
 from pa.db.connection import init_db
 from pa.db.repo import ANNOTATION_ORDER
 from pa.ingest import scanner, thumbs, volumes
+from pa.jobs.runner import STAGES as runner_stages
+from pa.jobs.runner import runner
 from pa.search.query import search as run_search
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
@@ -51,6 +54,35 @@ class RootIn(BaseModel):
     label: str | None = None
     exclude: list[str] = []
     scan: bool = True
+
+
+class ProcessIn(BaseModel):
+    stages: list[str] | None = None   # None = every stage, in pipeline order
+    limit: int = 100_000
+
+
+class SidecarIn(BaseModel):
+    root_id: int | None = None
+    overwrite: bool = False
+    beside: bool | None = None        # None = whatever [sidecar] location says
+
+
+class PruneIn(BaseModel):
+    keep_missing: bool = False
+
+
+class ResetIn(BaseModel):
+    stage: str
+    rebuild: bool = False   # also discard what the stage already produced
+
+
+class ConfigIn(BaseModel):
+    """A partial settings patch, shaped like the config file.
+
+    Partial matters: the UI sends only the sections a person actually touched,
+    so a setting it has never heard of is not wiped by a save.
+    """
+    model_config = {"extra": "allow"}
 
 
 def create_app() -> FastAPI:
@@ -560,6 +592,15 @@ def create_app() -> FastAPI:
                 app.state.scanning[root_id] = {
                     "seen": st.seen, "new": st.new_photos, "state": "done",
                     "errors": st.errors[:3]}
+                # A scan leaves a queue behind, not results. Draining it here is
+                # what makes "add a folder" produce visible photos rather than a
+                # grid of placeholders waiting for someone to know about the CLI.
+                # Empty auto_process, or a run already going, leaves it alone.
+                if cfg.auto_process and not runner.running:
+                    # A manual run getting there first is fine: its work covers
+                    # the same queue, so there is nothing to recover from.
+                    with contextlib.suppress(RuntimeError, ValueError):
+                        runner.start(cfg, list(cfg.auto_process), trigger="scan")
             except Exception as exc:
                 app.state.scanning[root_id] = {"state": "failed", "error": str(exc)[:300]}
             finally:
@@ -592,6 +633,184 @@ def create_app() -> FastAPI:
                JOIN photo_tag pt ON pt.tag_id=t.id
                GROUP BY t.id ORDER BY n DESC LIMIT ?""", (limit,)).fetchall()
         return {"tags": [dict(r) for r in rows]}
+
+    # --------------------------------------------------------------- pipeline
+    # A scan only *enqueues* work. Something has to drain that queue, and until
+    # these existed the only something was `pa process` in a terminal -- which
+    # is why a freshly scanned folder sat there as a grid of grey placeholders.
+    @app.get("/api/process")
+    def api_process_status() -> Any:
+        conn = db()
+        # "stages" belongs to the running job (what this run was asked to do);
+        # "stages_all" is every stage that exists, which is what the UI draws
+        # cards for. Naming them apart keeps the run's own list from being
+        # clobbered by the catalogue.
+        return {**runner.status(), "queue": repo.job_stats(conn),
+                "stages_all": list(runner_stages)}
+
+    @app.post("/api/process")
+    def api_process_start(body: ProcessIn) -> Any:
+        try:
+            return runner.start(cfg, body.stages, body.limit, trigger="manual")
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    @app.post("/api/process/cancel")
+    def api_process_cancel() -> Any:
+        return {"ok": True, "cancelling": runner.cancel()}
+
+    @app.post("/api/process/retry-failed")
+    def api_retry_failed(stage: str | None = None) -> Any:
+        """Put failed jobs back in the queue.
+
+        Failures are usually environmental -- an unplugged drive, a model server
+        that was down -- so they should be retryable without re-scanning the
+        whole folder, which would re-hash every file to learn nothing.
+        """
+        conn = db()
+        sql = "UPDATE job SET state='pending', attempts=0, error=NULL WHERE state='failed'"
+        args: list = []
+        if stage:
+            if stage not in repo.STAGES:
+                raise HTTPException(400, f"unknown stage {stage!r}")
+            sql += " AND stage=?"
+            args.append(stage)
+        n = conn.execute(sql, args).rowcount
+        conn.commit()
+        return {"ok": True, "requeued": n}
+
+    @app.post("/api/process/reset")
+    def api_reset_stage(body: ResetIn) -> Any:
+        """Re-run a stage over the whole library, e.g. after changing its model.
+
+        `rebuild` additionally throws away what the stage already produced. It
+        matters for thumbnails: generate() skips any thumbnail whose file is
+        already there, so re-queueing alone after changing the size or format
+        would report 'done' for every photo and change nothing at all.
+        """
+        if body.stage not in repo.STAGES:
+            raise HTTPException(400, f"unknown stage {body.stage!r}")
+        removed = 0
+        if body.rebuild and body.stage == "thumbs":
+            # Derived data by definition -- the README calls the thumbnail cache
+            # rebuildable. The cost is that photos on a disconnected drive lose
+            # their previews until that drive is back, so the UI confirms first.
+            for path in cfg.paths.thumbs_dir.rglob("*.*"):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+                    removed += 1
+        conn = db()
+        n = conn.execute(
+            "UPDATE job SET state='pending', attempts=0, error=NULL WHERE stage=?",
+            (body.stage,)).rowcount
+        conn.commit()
+        return {"ok": True, "stage": body.stage, "requeued": n, "removed": removed}
+
+    @app.post("/api/people/cluster")
+    def api_cluster() -> Any:
+        """Regroup faces into people. Runs through the same runner as indexing so
+        the two cannot collide over the database."""
+        try:
+            return runner.start(cfg, ["cluster"], trigger="manual")
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from None
+
+    # -------------------------------------------------------------- maintenance
+    @app.post("/api/sidecar/export")
+    def api_sidecar_export(body: SidecarIn) -> Any:
+        from pa.sidecar import bulk
+        conn = db()
+        use = cfg
+        if body.beside is not None:
+            use = cfg.model_copy(deep=True)
+            use.sidecar.location = "beside" if body.beside else "app"
+        res = bulk.export(conn, use, body.root_id, overwrite=body.overwrite)
+        return {"ok": True, "written": res.written, "skipped": res.skipped,
+                "offline": res.offline, "total": res.total, "errors": res.errors[:5],
+                "location": "beside your photos" if use.sidecar.location == "beside"
+                else str(use.paths.sidecars_dir)}
+
+    @app.post("/api/sidecar/import")
+    def api_sidecar_import(body: SidecarIn) -> Any:
+        from pa.sidecar import bulk
+        conn = db()
+        res = bulk.read_back(conn, cfg, body.root_id)
+        return {"ok": True, "found": res.found, "tags": res.tags}
+
+    @app.post("/api/prune")
+    def api_prune(body: PruneIn) -> Any:
+        conn = db()
+        n = repo.prune_orphans(conn, drop_missing=not body.keep_missing)
+        conn.commit()
+        return {"ok": True, "dropped": n}
+
+    # ------------------------------------------------------------------ config
+    @app.get("/api/config")
+    def api_config() -> Any:
+        """Current settings, plus everything the UI needs to render them well:
+        the defaults to offer as a reset, the provider names actually installed,
+        and which fields cannot take effect without a restart or a re-index."""
+        from pa.config import (
+            CONFIG_PATH,
+            REINDEX_REQUIRED,
+            RESTART_REQUIRED,
+            Config,
+        )
+        from pa.providers.registry import available
+
+        def shape(c) -> dict[str, Any]:
+            return {
+                "caption": c.caption.model_dump(), "embed": c.embed.model_dump(),
+                "face": c.face.model_dump(), "thumbs": c.thumbs.model_dump(),
+                "sidecar": c.sidecar.model_dump(),
+                "server": {"host": c.host, "port": c.port,
+                           "scan_workers": c.scan_workers,
+                           "auto_process": list(c.auto_process)},
+            }
+
+        return {
+            "path": str(CONFIG_PATH), "exists": CONFIG_PATH.exists(),
+            "config": shape(cfg), "defaults": shape(Config()),
+            "providers": {kind: sorted(available(kind))
+                          for kind in ("caption", "image_embed", "face")},
+            "restart_required": RESTART_REQUIRED,
+            "reindex_required": REINDEX_REQUIRED,
+            "stages": list(repo.STAGES),
+            "paths": {"data": str(cfg.paths.data_dir), "cache": str(cfg.paths.cache_dir),
+                      "database": str(cfg.paths.db_path),
+                      "thumbnails": str(cfg.paths.thumbs_dir),
+                      "vectors": str(cfg.paths.vectors_dir),
+                      "sidecars": str(cfg.paths.sidecars_dir)},
+        }
+
+    @app.put("/api/config")
+    def api_save_config(body: ConfigIn) -> Any:
+        from pydantic import ValidationError
+
+        from pa.config import save_config
+        try:
+            save_config(body.model_dump())
+        except ValidationError as exc:
+            # Surface the field and the reason, not a wall of pydantic JSON.
+            first = exc.errors()[0]
+            where = ".".join(str(p) for p in first["loc"])
+            raise HTTPException(400, f"{where}: {first['msg']}") from None
+        except OSError as exc:
+            raise HTTPException(500, f"could not write the config file: {exc}") from None
+
+        # save_config() mutates the Config object in place, so the `cfg` captured
+        # by every handler in this closure is already current. What it cannot fix
+        # is anything built *from* those settings, so drop those here.
+        app.state.index = None
+        runner.forget_providers()
+        return api_config()
+
+    @app.get("/api/config/check")
+    def api_config_check() -> Any:
+        from pa.providers import health
+        return health.report(cfg)
 
     @app.exception_handler(sqlite3.OperationalError)
     def _sqlite_error(request, exc):  # pragma: no cover

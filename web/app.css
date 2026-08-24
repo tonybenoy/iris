@@ -351,3 +351,100 @@ button.danger:hover{color:var(--lex);border-color:var(--lex)}
   font-size:10.5px}
 .editrow button:hover{color:var(--lex)}
 .ocr.editable{margin-left:0}
+
+/* ------------------------------------------------- indexing & settings */
+/* A panel is the neutral container for anything that is controls rather than
+   photographs. Same surface as a .stat card so the two read as one family. */
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:16px 18px;margin-bottom:10px}
+.note{margin:12px 0 0;font-size:12px;color:var(--faint)}
+.note.bad{color:var(--lex)}
+button.ghostbtn:disabled{opacity:.4;cursor:not-allowed}
+
+.runbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.runstate{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--sem)}
+.runprog{height:3px;background:var(--raised);border-radius:2px;overflow:hidden;margin-top:14px}
+.runprog i{display:block;height:100%;background:var(--sem);width:0;
+  transition:width .4s ease}
+/* Clustering has no per-photo counter, so it gets a moving bar that promises
+   nothing about how far along it is. */
+.runprog.indet i{width:35%;animation:slide 1.1s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-35%}100%{margin-left:100%}}
+
+.stages{display:grid;gap:9px;margin-top:16px;
+  grid-template-columns:repeat(auto-fill,minmax(232px,1fr))}
+.stagecard{background:var(--canvas);border:1px solid var(--line);border-radius:9px;padding:12px 13px}
+.stagecard.now{border-color:var(--sem);box-shadow:0 0 0 1px var(--sem)}
+.stagehd{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.stagehd b{font-size:13px}
+.stagecard p{margin:6px 0 10px;font-size:11.5px;color:var(--faint);line-height:1.45}
+.counts{display:flex;flex-wrap:wrap;gap:9px;
+  font-family:"JetBrains Mono",monospace;font-size:11px}
+.counts .ok{color:var(--sem)}
+.counts .wait{color:var(--lex)}
+.counts .bad{color:#E8734B;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
+.counts .idle{color:var(--faint)}
+
+.health{display:grid;gap:8px;margin-top:12px}
+.hrow{display:flex;gap:12px;align-items:flex-start;background:var(--canvas);
+  border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+.hbadge{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.06em;
+  padding:3px 7px;border-radius:4px;background:var(--raised);color:var(--faint);flex:none}
+.hrow.ok .hbadge{background:rgba(111,168,255,.15);color:var(--sem)}
+.hrow.warn .hbadge{background:rgba(232,184,75,.13);color:var(--lex)}
+.hrow.fail .hbadge{background:rgba(232,115,75,.15);color:#E8734B}
+.hrow b{font-size:13px}
+.hdetail{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);margin-top:3px}
+.hmsg{font-size:12px;color:var(--faint);margin-top:5px}
+.hhint{font-size:12px;color:var(--lex);margin-top:5px;line-height:1.45}
+
+.secblurb{margin:0 0 16px;font-size:12.5px;color:var(--dim);max-width:74ch;line-height:1.5}
+.field{display:grid;grid-template-columns:1fr 260px;gap:18px;align-items:start;
+  padding:11px 0;border-top:1px solid var(--line)}
+.field .fl{display:block;font-size:13px;font-weight:500}
+.field .fh{display:block;font-size:11.5px;color:var(--faint);margin-top:3px;
+  line-height:1.45;max-width:62ch}
+.field .fi{display:flex;align-items:center;gap:8px}
+.field input,.field select,.field textarea{
+  flex:1;min-width:0;background:var(--canvas);border:1px solid var(--line);border-radius:6px;
+  padding:7px 10px;color:var(--text);
+  font-family:"JetBrains Mono",ui-monospace,monospace;font-size:12px}
+.field textarea{resize:vertical;line-height:1.5}
+.field input:focus,.field select:focus,.field textarea:focus{
+  outline:none;border-color:var(--lex)}
+.field .unit{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint);flex:none}
+.flag{margin-left:8px;font-family:"JetBrains Mono",monospace;font-size:9.5px;
+  letter-spacing:.05em;text-transform:uppercase;padding:2px 6px;border-radius:4px;
+  background:rgba(232,184,75,.13);color:var(--lex);cursor:help;white-space:nowrap}
+.stagepick{display:grid;gap:5px;width:100%}
+.stagepick .toggle{font-size:12px;padding:0}
+.secfoot{border-top:1px solid var(--line);padding-top:13px;margin-top:4px}
+
+/* The save bar follows you down a long form: a Save you have to scroll to find
+   is a Save people assume does not exist. */
+.savebar{position:sticky;bottom:0;z-index:30;display:flex;align-items:center;gap:12px;
+  justify-content:flex-end;flex-wrap:wrap;
+  background:rgba(11,11,12,.94);backdrop-filter:blur(12px);
+  border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin:14px 0 30px}
+.savebar .note{margin:0;flex:1;min-width:180px}
+
+.tools{display:grid;gap:10px}
+.tool{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;
+  flex-wrap:wrap;background:var(--canvas);border:1px solid var(--line);
+  border-radius:9px;padding:13px 14px}
+.tool b{font-size:13px}
+.tool p{margin:5px 0 0;font-size:11.5px;color:var(--faint);line-height:1.45;max-width:62ch}
+.tool-acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.tool-acts .toggle{padding:0;font-size:12px}
+
+.paths .row{display:flex;justify-content:space-between;gap:18px;padding:7px 0;
+  border-top:1px solid var(--line)}
+.paths .row:first-child{border-top:0}
+.paths .row span{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint);
+  text-transform:uppercase;letter-spacing:.05em;flex:none}
+.paths .row code{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);
+  word-break:break-all;text-align:right}
+
+@media (max-width:720px){
+  .field{grid-template-columns:1fr;gap:8px}
+}
