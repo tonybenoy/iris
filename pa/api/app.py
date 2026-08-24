@@ -909,10 +909,12 @@ def create_app() -> FastAPI:
             return {"thumbnails": removed}
         if stage == "embed":
             n = conn.execute("DELETE FROM photo_embedding").rowcount
-            for name in ("image_vectors.f16", "image_ids.i64", "meta.json"):
+            # Drop the app's index first: it holds a memory map of these files,
+            # and on Windows a mapped file will not be deleted.
+            app.state.index = None
+            for path in cfg.paths.vectors_dir.glob("*"):
                 with contextlib.suppress(OSError):
-                    (cfg.paths.vectors_dir / name).unlink()
-            app.state.index = None   # it holds the old file and the old model
+                    path.unlink()
             return {"vectors": n}
         if stage == "faces":
             # Named (confirmed) and ignored (rejected) faces are decisions, not

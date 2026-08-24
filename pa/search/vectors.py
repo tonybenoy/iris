@@ -12,14 +12,28 @@ swapped for a real ANN index behind the same three methods.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import numpy as np
 
+# The names an older library wrote before builds were generation-stamped.
+LEGACY_VECTORS = "image_vectors.f16"
+LEGACY_IDS = "image_ids.i64"
+
 
 class VectorIndex:
+    """Reader and writer of the index files.
+
+    Several of these exist at once over the same directory -- the web app holds
+    one for searching, the indexer makes its own to rebuild with, and the CLI a
+    third -- which is why a build never writes over the file a reader may have
+    mapped. See build().
+    """
+
     def __init__(self, directory: Path, dim: int, model: str):
         self.dir = directory
         self.dim = dim
@@ -27,31 +41,57 @@ class VectorIndex:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._vectors: np.ndarray | None = None
         self._ids: np.ndarray | None = None
-
-    @property
-    def _vec_path(self) -> Path:
-        return self.dir / "image_vectors.f16"
-
-    @property
-    def _id_path(self) -> Path:
-        return self.dir / "image_ids.i64"
+        self._loaded: tuple[str, str] | None = None   # the files currently mapped
 
     @property
     def _meta_path(self) -> Path:
         return self.dir / "meta.json"
 
+    def _meta(self) -> dict:
+        if not self._meta_path.exists():
+            return {}
+        try:
+            return json.loads(self._meta_path.read_text())
+        except (OSError, ValueError):
+            return {}   # half-written by a build that was killed
+
+    def release(self) -> None:
+        """Drop the memory map. On Windows a mapped file cannot be replaced or
+        deleted, so anything about to rewrite the index has to let go first."""
+        self._vectors = self._ids = None
+        self._loaded = None
+
     def build(self, conn: sqlite3.Connection, batch: int = 8192) -> int:
-        """Rebuild from photo_embedding. Streams so memory stays flat."""
+        """Rebuild from photo_embedding. Streams so memory stays flat.
+
+        Each build writes new files under a fresh name and points meta.json at
+        them, rather than overwriting the ones already there.
+
+        Writing in place is fine on Linux, where unlinking a mapped file just
+        defers the delete until the last reader closes it. Windows has no such
+        thing: a file another handle has mapped cannot be truncated, replaced or
+        removed, and any search since the server started leaves exactly such a
+        map behind. Rebuilding then died with "OSError: [Errno 22] Invalid
+        argument" on image_vectors.f16 -- which, being how a redo of the embed
+        stage finishes, made the whole model change impossible to complete.
+
+        Naming each build separately means a reader never blocks a writer. The
+        superseded files are deleted afterwards if they can be, and otherwise
+        left for the next build to collect.
+        """
+        self.release()
         total = conn.execute(
             "SELECT COUNT(*) FROM photo_embedding WHERE model=?", (self.model,)).fetchone()[0]
         if total == 0:
-            for p in (self._vec_path, self._id_path, self._meta_path):
-                p.unlink(missing_ok=True)
-            self._vectors = self._ids = None
+            with contextlib.suppress(OSError):
+                self._meta_path.unlink(missing_ok=True)
+            self._sweep(keep=())
             return 0
 
+        stamp = time.time_ns()
+        vec_name, id_name = f"image_vectors.{stamp}.f16", f"image_ids.{stamp}.i64"
         vecs = np.lib.format.open_memmap(
-            self._vec_path, mode="w+", dtype=np.float16, shape=(total, self.dim))
+            self.dir / vec_name, mode="w+", dtype=np.float16, shape=(total, self.dim))
         ids = np.empty(total, dtype=np.int64)
         offset = 0
         cur = conn.execute(
@@ -63,22 +103,58 @@ class VectorIndex:
             ids[offset:offset + len(rows)] = [r["photo_id"] for r in rows]
             offset += len(rows)
         vecs.flush()
-        ids.tofile(self._id_path)
+        del vecs   # closes this build's own map before anything tries to tidy up
+        ids.tofile(self.dir / id_name)
+        # Written last: until meta.json names them, the new files are invisible
+        # and a reader carries on with the old index rather than half of this one.
         self._meta_path.write_text(json.dumps(
-            {"model": self.model, "dim": self.dim, "count": total}))
-        self._vectors = self._ids = None
+            {"model": self.model, "dim": self.dim, "count": total,
+             "vectors": vec_name, "ids": id_name}))
+        self._sweep(keep=(vec_name, id_name))
         return total
 
+    def _sweep(self, keep: tuple[str, ...]) -> None:
+        """Delete superseded index files, best effort.
+
+        A file some other reader still has mapped will refuse to go on Windows.
+        That is not worth failing a build over: it is a few megabytes until the
+        next one, which will find it unmapped and take it then.
+        """
+        for path in [*self.dir.glob("image_vectors.*"), *self.dir.glob("image_ids.*"),
+                     self.dir / LEGACY_VECTORS, self.dir / LEGACY_IDS]:
+            if path.name not in keep:
+                with contextlib.suppress(OSError):
+                    path.unlink(missing_ok=True)
+
     def _ensure_loaded(self) -> bool:
-        if self._vectors is not None:
-            return True
-        if not self._vec_path.exists() or not self._meta_path.exists():
-            return False
-        meta = json.loads(self._meta_path.read_text())
+        """Map the files meta.json currently names, if they are not already.
+
+        Checked on every search rather than once, because a build now writes new
+        files instead of overwriting these -- so an instance that mapped the old
+        ones would go on answering from them forever. The web app holds exactly
+        such an instance for the life of the process, which would mean searching
+        a freshly re-embedded library and getting the previous model's answers.
+        Reading one small file per query costs nothing next to the matrix
+        multiply it precedes.
+        """
+        meta = self._meta()
         if meta.get("model") != self.model or meta.get("dim") != self.dim:
             return False  # embedding model changed; index is stale until rebuilt
-        self._vectors = np.load(self._vec_path, mmap_mode="r")
-        self._ids = np.fromfile(self._id_path, dtype=np.int64)
+        names = (meta.get("vectors", LEGACY_VECTORS), meta.get("ids", LEGACY_IDS))
+        if self._vectors is not None and self._loaded == names:
+            return True
+        vec_path, id_path = self.dir / names[0], self.dir / names[1]
+        if not vec_path.exists() or not id_path.exists():
+            return False
+        try:
+            self._vectors = np.load(vec_path, mmap_mode="r")
+            self._ids = np.fromfile(id_path, dtype=np.int64)
+        except (OSError, ValueError):
+            # Truncated or unreadable: no index is a working search that finds
+            # less, where a raised error is a search screen that shows nothing.
+            self.release()
+            return False
+        self._loaded = names
         return True
 
     def search(self, query_vec: np.ndarray, limit: int = 200,
@@ -113,6 +189,4 @@ class VectorIndex:
         return [int(self._ids[i]) for i in top if scores[i] >= cutoff]
 
     def count(self) -> int:
-        if not self._meta_path.exists():
-            return 0
-        return int(json.loads(self._meta_path.read_text()).get("count", 0))
+        return int(self._meta().get("count", 0))

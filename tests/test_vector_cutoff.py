@@ -80,3 +80,118 @@ def test_no_match_means_no_results_not_whole_library(tmp_path):
     assert search(conn, "mountains", vector_search=lambda t, n: []) == [], \
         "no engine matched: must return empty, not the library"
     assert isinstance(conn, sqlite3.Connection)
+
+
+# ------------------------------------------------------- rebuilding the index
+# Several VectorIndex objects live over one directory at once: the web app holds
+# one for searching, the indexer makes its own to rebuild with, the CLI a third.
+# On Linux a build could overwrite the files under a reader and nothing minded.
+# On Windows a mapped file cannot be truncated, replaced or deleted, so the same
+# build raised "OSError: [Errno 22] Invalid argument" -- which is how a redo of
+# the embed stage finishes, making a model change impossible to complete.
+@pytest.fixture
+def library(tmp_path):
+    from pa.db.connection import init_db
+
+    conn = init_db(tmp_path / "library.db")
+    for photo_id in (1, 2, 3):
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, f"hash{photo_id}"))
+    conn.commit()
+    return conn
+
+
+def _embed(conn, photo_id, vector, model="m1"):
+    vec = np.asarray(vector, dtype=np.float32)
+    conn.execute("INSERT INTO photo_embedding (photo_id, embedding, model, dim, created_at) "
+                 "VALUES (?,?,?,?,0)", (photo_id, vec.tobytes(), model, len(vec)))
+    conn.commit()
+
+
+def test_a_build_does_not_write_over_a_file_a_reader_has_mapped(tmp_path, library):
+    """The Windows failure cannot be reproduced on Linux -- there, overwriting a
+    mapped file is allowed -- so this asserts the mechanism that avoids it: the
+    second build must land somewhere the first one is not."""
+    import json
+
+    vectors = tmp_path / "vectors"
+    reader = VectorIndex(vectors, 2, "m1")
+    _embed(library, 1, [1.0, 0.0])
+    VectorIndex(vectors, 2, "m1").build(library)
+
+    # Searching is what maps the file, and that map is what blocks the rebuild.
+    assert reader.search(np.array([1.0, 0.0], dtype=np.float32)) == [1]
+    was = json.loads((vectors / "meta.json").read_text())["vectors"]
+
+    _embed(library, 2, [0.0, 1.0])
+    assert VectorIndex(vectors, 2, "m1").build(library) == 2
+    now = json.loads((vectors / "meta.json").read_text())["vectors"]
+    assert now != was, "a rebuild wrote over the file a reader had open"
+
+
+def test_a_reader_picks_up_the_rebuild(tmp_path, library):
+    """The web app keeps one index for the life of the process. Mapping the old
+    files forever would mean searching a re-embedded library and being answered
+    by the model it replaced."""
+    reader = VectorIndex(tmp_path / "vectors", 2, "m1")
+    _embed(library, 1, [1.0, 0.0])
+    VectorIndex(tmp_path / "vectors", 2, "m1").build(library)
+    query = np.array([0.0, 1.0], dtype=np.float32)
+    assert reader.search(query, min_score=0.5) == []
+
+    _embed(library, 2, [0.0, 1.0])
+    VectorIndex(tmp_path / "vectors", 2, "m1").build(library)
+    assert reader.search(query, min_score=0.5) == [2], "still answering from the old files"
+
+
+def test_superseded_files_are_cleared_away(tmp_path, library):
+    vectors = tmp_path / "vectors"
+    _embed(library, 1, [1.0, 0.0])
+    for _ in range(3):
+        VectorIndex(vectors, 2, "m1").build(library)
+    assert len(list(vectors.glob("image_vectors.*"))) == 1
+    assert len(list(vectors.glob("image_ids.*"))) == 1
+
+
+def test_an_index_from_an_older_version_still_loads(tmp_path, library):
+    """meta.json used to name no files at all -- the two were always called the
+    same thing. An upgrade must not silently lose the index it already had."""
+    import json
+
+    from pa.search.vectors import LEGACY_IDS, LEGACY_VECTORS
+
+    vectors = tmp_path / "vectors"
+    _embed(library, 1, [1.0, 0.0])
+    VectorIndex(vectors, 2, "m1").build(library)
+    # Rename it back to what the previous version wrote.
+    meta = json.loads((vectors / "meta.json").read_text())
+    (vectors / meta["vectors"]).rename(vectors / LEGACY_VECTORS)
+    (vectors / meta["ids"]).rename(vectors / LEGACY_IDS)
+    (vectors / "meta.json").write_text(json.dumps(
+        {"model": "m1", "dim": 2, "count": 1}))
+
+    assert VectorIndex(vectors, 2, "m1").search(
+        np.array([1.0, 0.0], dtype=np.float32)) == [1]
+
+
+def test_an_empty_library_leaves_no_index_behind(tmp_path, library):
+    vectors = tmp_path / "vectors"
+    _embed(library, 1, [1.0, 0.0])
+    VectorIndex(vectors, 2, "m1").build(library)
+    library.execute("DELETE FROM photo_embedding")
+    library.commit()
+
+    index = VectorIndex(vectors, 2, "m1")
+    assert index.build(library) == 0
+    assert index.count() == 0
+    assert list(vectors.glob("image_*")) == []
+
+
+def test_a_half_written_meta_is_not_an_error(tmp_path, library):
+    """A build killed part way used to take search down with it."""
+    vectors = tmp_path / "vectors"
+    vectors.mkdir(parents=True)
+    (vectors / "meta.json").write_text('{"model": "m1", "dim"')
+    index = VectorIndex(vectors, 2, "m1")
+    assert index.count() == 0
+    assert index.search(np.array([1.0, 0.0], dtype=np.float32)) == []
