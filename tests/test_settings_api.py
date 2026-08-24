@@ -340,3 +340,35 @@ def test_a_stage_with_only_offline_photos_still_finishes(cfg):
     # a restart clears it.
     assert row["state"] == "pending"
     assert row["attempts"] <= 2
+
+
+def test_the_status_says_a_model_is_loading(cfg, monkeypatch):
+    """Loading an 800M parameter model is a minute in which transformers prints
+    a progress bar, finishes it, and then goes quiet. Every report of "it seems
+    stuck" has been that minute, so the run has to be able to say what it is
+    doing while nothing is countable."""
+    import threading
+
+    import pa.providers.registry as registry
+    from pa.jobs.runner import PipelineRunner
+
+    loading, release = threading.Event(), threading.Event()
+
+    def slow_load(_cfg):
+        loading.set()
+        release.wait(5)
+        return object()
+
+    monkeypatch.setattr(registry, "get_image_embedder", slow_load)
+    runner = PipelineRunner()
+    runner._state["running"] = True   # provider() reports into a live run
+
+    got = threading.Thread(target=lambda: runner.provider("embed", cfg), daemon=True)
+    got.start()
+    assert loading.wait(5)
+    state = runner.status()
+    assert state["phase"] == "loading"
+    assert cfg.embed.model in state["note"]
+    release.set()
+    got.join(5)
+    assert runner.status()["phase"] == "working"

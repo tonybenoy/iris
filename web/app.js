@@ -1057,19 +1057,26 @@ function renderPipeline(d) {
 
   const p = d.progress || {};
   const bar = $('#runprog');
+  const loading = running && d.phase === 'loading';
   bar.hidden = !running;
   if (running) {
     const stage = d.stage || '';
     const seen = (p.done || 0) + (p.failed || 0);
     const total = (d.queue?.[stage]?.pending || 0) + seen;
-    // Clustering reads every face at once and has no per-photo counter, so an
-    // honest indeterminate bar beats one that never moves.
-    bar.classList.toggle('indet', stage === 'cluster');
+    // Clustering reads every face at once and has no per-photo counter, and a
+    // model being loaded has no counter either. An honest indeterminate bar
+    // beats one that sits at zero looking crashed.
+    bar.classList.toggle('indet', stage === 'cluster' || loading);
     bar.firstElementChild.style.width =
-      stage === 'cluster' ? '' : `${total ? Math.min(100, seen / total * 100) : 0}%`;
+      stage === 'cluster' || loading
+        ? '' : `${total ? Math.min(100, seen / total * 100) : 0}%`;
   }
 
-  $('#runstate').textContent = running
+  // The first load of an 800M parameter model is a minute of silence, and
+  // silence is what a hang looks like. Say which model, and that it is normal.
+  $('#runstate').textContent = loading
+    ? `${d.note || 'Loading the model'} — the first run takes a while`
+    : running
     ? `${STAGE_INFO[d.stage]?.name || d.stage || 'starting'} — ${p.done || 0} done` +
       `${p.failed ? `, ${p.failed} failed` : ''}` +
       `${p.skipped ? `, ${p.skipped} waiting on a drive` : ''}`

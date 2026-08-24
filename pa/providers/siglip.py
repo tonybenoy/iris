@@ -7,6 +7,7 @@ vision tower locally regardless of where the captioner lives.
 from __future__ import annotations
 
 import io
+import sys
 import threading
 
 import numpy as np
@@ -30,7 +31,13 @@ def _from_cache_first(loader, model_id: str, **kwargs):
     try:
         return loader.from_pretrained(model_id, local_files_only=True, **kwargs)
     except Exception:
-        # Not cached yet (or the cache is incomplete): fetch it, once.
+        # Not cached yet (or the cache is incomplete): fetch it, once. Said out
+        # loud because this is the one step here that needs the internet, and a
+        # download stalling behind a proxy or a rate limit looks exactly like a
+        # crash -- transformers prints nothing at all until bytes arrive.
+        print(f"[iris] {model_id} is not in the local cache: downloading it from "
+              f"huggingface.co (this needs internet, and is once only)",
+              file=sys.stderr, flush=True)
         return loader.from_pretrained(model_id, **kwargs)
 
 
@@ -56,6 +63,12 @@ class SiglipEmbedder(ImageEmbedder, TextEmbedder):
             self._torch = torch
             device = self.cfg.device
             if device == "cuda" and not torch.cuda.is_available():
+                # Not an error -- it works -- but roughly 30x slower, which is
+                # the difference between an hour and a day on a real library.
+                # Worth saying rather than leaving someone to conclude it hung.
+                print("[iris] cuda was asked for but torch cannot see a GPU: "
+                      "embedding on the CPU instead, which is far slower",
+                      file=sys.stderr, flush=True)
                 device = "cpu"
             self.device = device
             # fp16 halves VRAM and is faster; the retrieval quality difference is

@@ -9,6 +9,7 @@ another thread, and a cancel that never loses committed work.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from typing import Any
@@ -47,6 +48,10 @@ class PipelineRunner:
             "progress": {"done": 0, "failed": 0, "skipped": 0},
             "results": {}, "started_at": None, "finished_at": None,
             "error": None, "cancelled": False, "trigger": None,
+            # What the current stage is doing. Loading a model is minutes of
+            # nothing on the first run, and a progress bar at zero with no
+            # explanation is indistinguishable from a hang.
+            "phase": None, "note": None,
         }
 
     # ---------------------------------------------------------------- public
@@ -78,6 +83,7 @@ class PipelineRunner:
                 "progress": {"done": 0, "failed": 0, "skipped": 0},
                 "results": {}, "started_at": time.time(), "finished_at": None,
                 "error": None, "cancelled": False, "trigger": trigger,
+                "phase": "starting", "note": None,
             }
             self._thread = threading.Thread(
                 target=self._run, args=(cfg, wanted, limit), daemon=True)
@@ -123,10 +129,30 @@ class PipelineRunner:
         cached = self._providers.get(kind)
         if cached and cached[0] == key:
             return cached[1]
-        built = {"embed": get_image_embedder, "faces": get_face_analyzer,
-                 "caption": get_captioner}[kind](cfg)
+        # Say so, in the terminal and in the UI. The first load of an 800M
+        # parameter model is a minute of complete silence, and silence is
+        # indistinguishable from a hang -- the more so because transformers
+        # prints its own progress bar and then stops, which reads as the point
+        # where it got stuck rather than the point where it finished.
+        device = getattr(section, "device", "") or ""
+        self._say(f"loading the {kind} model {section.model}"
+                  f"{f' on {device}' if device else ''}")
+        self._state["phase"] = "loading"
+        self._state["note"] = f"Loading {section.model}"
+        began = time.monotonic()
+        try:
+            built = {"embed": get_image_embedder, "faces": get_face_analyzer,
+                     "caption": get_captioner}[kind](cfg)
+        finally:
+            self._state["phase"] = "working"
+            self._state["note"] = None
+        self._say(f"{kind} model ready in {time.monotonic() - began:.0f}s")
         self._providers[kind] = (key, built)
         return built
+
+    @staticmethod
+    def _say(message: str) -> None:
+        print(f"[iris] {message}", file=sys.stderr, flush=True)
 
     def _progress_cb(self, stage: str):
         """Publish a stage's counters, and turn a cancel request into an unwind."""
@@ -134,6 +160,7 @@ class PipelineRunner:
             if self._cancel.is_set():
                 raise Cancelled
             self._state["stage"] = stage
+            self._state["phase"] = "working"
             self._state["progress"] = {
                 "done": res.done, "failed": res.failed, "skipped": res.skipped}
         return cb
@@ -155,7 +182,14 @@ class PipelineRunner:
                 self._state["stage"] = stage
                 self._state["queued"] = stages[stages.index(stage) + 1:]
                 self._state["progress"] = {"done": 0, "failed": 0, "skipped": 0}
+                self._state["phase"] = "working"
+                self._say(f"stage {stage}: starting")
+                began = time.monotonic()
                 self._run_stage(conn, cfg, stage, limit)
+                done = self._state["results"].get(stage, {})
+                self._say(f"stage {stage}: finished in {time.monotonic() - began:.0f}s "
+                          f"({done.get('done', 0)} done, {done.get('failed', 0)} failed, "
+                          f"{done.get('skipped', 0)} waiting on a drive)")
         except Cancelled:
             self._state["cancelled"] = True
             if conn is not None:
@@ -170,6 +204,8 @@ class PipelineRunner:
                 conn.close()
             self._state["stage"] = None
             self._state["queued"] = []
+            self._state["phase"] = None
+            self._state["note"] = None
             self._state["finished_at"] = time.time()
             self._state["running"] = False
 
