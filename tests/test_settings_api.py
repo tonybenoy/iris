@@ -208,6 +208,104 @@ def _wait_for_idle(client, tries=100):
     raise AssertionError("pipeline never went idle")
 
 
+# ------------------------------------------------------- redoing the library
+# Stages are keyed on what they have already done, which is what makes indexing
+# resumable -- and what makes changing a model change nothing at all, because
+# every photo is already marked done under the old one.
+
+
+@pytest.fixture
+def library(cfg):
+    """Three photos; only the first has ever been through a stage."""
+    from pa.db.connection import init_db
+    conn = init_db(cfg.paths.db_path)
+    for photo_id in (1, 2, 3):
+        conn.execute("INSERT INTO photo (id, blake3, created_at) VALUES (?,?,0)",
+                     (photo_id, f"hash{photo_id}"))
+    conn.execute("INSERT INTO job (photo_id, stage, state, attempts, priority, created_at) "
+                 "VALUES (1,'thumbs','done',2,100,0)")
+    conn.commit()
+    return conn
+
+
+def _redo(client, stage, **kw):
+    return client.post("/api/process/reset",
+                       json={"stage": stage, "rebuild": True, **kw}).json()
+
+
+def test_redo_covers_photos_that_never_had_a_job_row(client, library):
+    """A stage that was switched off when a photo was scanned leaves no job row
+    to reset, and those are exactly the photos someone switching it on wants."""
+    r = _redo(client, "thumbs")
+    assert r["requeued"] == 3
+    assert client.get("/api/process").json()["queue"]["thumbs"]["pending"] == 3
+    assert library.execute(
+        "SELECT attempts FROM job WHERE photo_id=1").fetchone()[0] == 0
+
+
+def test_redo_thumbs_throws_the_cache_away(client, cfg, library):
+    """generate() skips any thumbnail whose file is already there, so without
+    this a redo reports 'done' for every photo and changes nothing."""
+    from pa.ingest import thumbs
+    path = thumbs.thumb_path(cfg.paths.thumbs_dir, "hash1", "grid", "webp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(path)
+
+    assert _redo(client, "thumbs")["discarded"] == {"thumbnails": 1}
+    assert not path.exists()
+
+
+def test_redo_faces_keeps_the_people_you_named(client, library):
+    """Detections are output and go. Names and dismissals are decisions and stay
+    -- a redo that lost them would cost hours of naming to change a model."""
+    import numpy as np
+    vec = np.zeros(512, dtype=np.float32).tobytes()
+    for face_id, confirmed, rejected in ((1, 1, 0), (2, 0, 1), (3, 0, 0)):
+        library.execute(
+            """INSERT INTO face (id, photo_id, bbox_x, bbox_y, bbox_w, bbox_h,
+                                 det_score, embedding, model, confirmed, rejected, created_at)
+               VALUES (?,1,0,0,10,10,0.9,?,'old-model',?,?,0)""",
+            (face_id, vec, confirmed, rejected))
+    library.commit()
+
+    assert _redo(client, "faces")["discarded"] == {"faces": 1}
+    assert {r[0] for r in library.execute("SELECT id FROM face")} == {1, 2}
+
+
+def test_redo_embed_forgets_the_vectors_and_the_index(client, cfg, library):
+    """Vectors from another model are a different space; keeping them would mix
+    two coordinate systems in one index."""
+    library.execute(
+        "INSERT INTO photo_embedding (photo_id, embedding, model, dim, created_at) "
+        "VALUES (1,?, 'old-model', 4, 0)", (b"\x00" * 16,))
+    library.commit()
+    cfg.paths.vectors_dir.mkdir(parents=True, exist_ok=True)
+    stale = cfg.paths.vectors_dir / "meta.json"
+    stale.write_text('{"model": "old-model", "dim": 4, "count": 1}')
+
+    assert _redo(client, "embed")["discarded"] == {"vectors": 1}
+    assert library.execute("SELECT COUNT(*) FROM photo_embedding").fetchone()[0] == 0
+    assert not stale.exists()
+
+
+def test_a_plain_requeue_discards_nothing(client, cfg, library):
+    from pa.ingest import thumbs
+    path = thumbs.thumb_path(cfg.paths.thumbs_dir, "hash1", "grid", "webp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (10, 10)).save(path)
+
+    r = client.post("/api/process/reset",
+                    json={"stage": "thumbs", "rebuild": False}).json()
+    assert r["requeued"] == 3 and r["discarded"] == {}
+    assert path.exists()
+
+
+def test_redo_rejects_a_stage_that_is_not_one(client, library):
+    r = client.post("/api/process/reset", json={"stage": "cluster", "rebuild": True})
+    assert r.status_code == 400, "clustering is not a per-photo queue"
+    assert "thumbs" in r.json()["detail"]
+
+
 def test_a_stage_with_only_offline_photos_still_finishes(cfg):
     """A photo whose drive is unplugged is put back in the queue rather than
     failed, which makes it immediately claimable again. Nothing else advanced

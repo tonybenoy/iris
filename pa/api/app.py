@@ -124,6 +124,7 @@ class PruneIn(BaseModel):
 class ResetIn(BaseModel):
     stage: str
     rebuild: bool = False   # also discard what the stage already produced
+    start: bool = False     # and begin the run, rather than only filling the queue
 
 
 class ConfigIn(BaseModel):
@@ -878,32 +879,84 @@ def create_app() -> FastAPI:
         conn.commit()
         return {"ok": True, "requeued": n}
 
-    @app.post("/api/process/reset")
-    def api_reset_stage(body: ResetIn) -> Any:
-        """Re-run a stage over the whole library, e.g. after changing its model.
+    def _discard(conn: sqlite3.Connection, stage: str) -> dict[str, int]:
+        """Throw away what a stage produced, keeping every decision you made.
 
-        `rebuild` additionally throws away what the stage already produced. It
-        matters for thumbnails: generate() skips any thumbnail whose file is
-        already there, so re-queueing alone after changing the size or format
-        would report 'done' for every photo and change nothing at all.
+        Changing a model is the reason this exists, and each stage needs a
+        different amount of help to actually start over:
+
+        thumbs  -- generate() skips any thumbnail whose file already exists, so
+                   without deleting them a re-run reports 'done' for every photo
+                   and changes nothing at all.
+        embed   -- vectors from the old model are a different space entirely.
+                   The index file is keyed on model and dim and refuses to load
+                   when they disagree, so search degrades to words until the
+                   run finishes and rebuilds it.
+        faces   -- run_faces only clears detections from the *same* model, which
+                   is what lets a re-run keep your names. Change the model and
+                   the old model's faces would otherwise stay forever, and every
+                   face would appear twice in the naming queue.
+        caption -- nothing to discard. Re-captioning replaces each photo's entry
+                   as it goes and rewrites that photo's search row with it, so
+                   the library is never inconsistent for longer than one photo.
         """
-        if body.stage not in repo.STAGES:
-            raise HTTPException(400, f"unknown stage {body.stage!r}")
-        removed = 0
-        if body.rebuild and body.stage == "thumbs":
-            # Derived data by definition -- the README calls the thumbnail cache
-            # rebuildable. The cost is that photos on a disconnected drive lose
-            # their previews until that drive is back, so the UI confirms first.
+        if stage == "thumbs":
+            removed = 0
             for path in cfg.paths.thumbs_dir.rglob("*.*"):
                 with contextlib.suppress(OSError):
                     path.unlink()
                     removed += 1
+            return {"thumbnails": removed}
+        if stage == "embed":
+            n = conn.execute("DELETE FROM photo_embedding").rowcount
+            for name in ("image_vectors.f16", "image_ids.i64", "meta.json"):
+                with contextlib.suppress(OSError):
+                    (cfg.paths.vectors_dir / name).unlink()
+            app.state.index = None   # it holds the old file and the old model
+            return {"vectors": n}
+        if stage == "faces":
+            # Named (confirmed) and ignored (rejected) faces are decisions, not
+            # output, and survive. Auto-assigned ones do not: they are a guess
+            # this very stage is about to make again.
+            n = conn.execute(
+                "DELETE FROM face WHERE confirmed=0 AND rejected=0").rowcount
+            return {"faces": n}
+        return {}
+
+    @app.post("/api/process/reset")
+    def api_reset_stage(body: ResetIn) -> Any:
+        """Re-run a stage over the entire library, e.g. after changing its model.
+
+        Stages are idempotent and keyed on what they have already done, which is
+        what makes indexing resumable -- and what makes a new model change
+        nothing until something says "do it all again". This is that something.
+        """
+        if body.stage not in repo.STAGES:
+            raise HTTPException(
+                400, f"unknown stage {body.stage!r}; expected any of {list(repo.STAGES)}")
         conn = db()
+        discarded = _discard(conn, body.stage) if body.rebuild else {}
+        # Every photo, not just the ones with a job row: a stage that was off
+        # when a photo was scanned has no row to reset, and those are exactly
+        # the photos someone turning a stage on wants covered.
         n = conn.execute(
-            "UPDATE job SET state='pending', attempts=0, error=NULL WHERE stage=?",
-            (body.stage,)).rowcount
+            """INSERT INTO job (photo_id, stage, state, priority, created_at)
+               SELECT id, ?, 'pending', 100, ? FROM photo WHERE 1
+               ON CONFLICT(photo_id, stage) DO UPDATE SET
+                 state='pending', attempts=0, error=NULL,
+                 started_at=NULL, finished_at=NULL""",
+            (body.stage, repo.now())).rowcount
         conn.commit()
-        return {"ok": True, "stage": body.stage, "requeued": n, "removed": removed}
+
+        started = False
+        if body.start and n:
+            try:
+                runner.start(cfg, [body.stage], trigger="redo")
+                started = True
+            except (RuntimeError, ValueError):
+                started = False   # already running; the queue is filled either way
+        return {"ok": True, "stage": body.stage, "requeued": n,
+                "discarded": discarded, "started": started}
 
     @app.post("/api/people/cluster")
     def api_cluster() -> Any:

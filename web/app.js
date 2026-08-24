@@ -1092,7 +1092,13 @@ function renderPipeline(d) {
       <div class="stagecard${running && d.stage === stage ? ' now' : ''}">
         <div class="stagehd">
           <b>${info.name}</b>
-          <button class="ghostbtn" data-run="${stage}"${running ? ' disabled' : ''}>Run</button>
+          <span class="stageacts">
+            ${stage === 'cluster' ? '' :
+              `<button class="ghostbtn danger" data-redo="${stage}"${running ? ' disabled' : ''}
+                 title="Do this stage again for every photo — what you want after changing its model"
+               >Redo all</button>`}
+            <button class="ghostbtn" data-run="${stage}"${running ? ' disabled' : ''}>Run</button>
+          </span>
         </div>
         <p>${info.blurb}</p>
         <div class="counts">${counts}</div>
@@ -1101,6 +1107,8 @@ function renderPipeline(d) {
 
   $('#stages').querySelectorAll('[data-run]').forEach(b =>
     b.addEventListener('click', () => startRun([b.dataset.run])));
+  $('#stages').querySelectorAll('[data-redo]').forEach(b =>
+    b.addEventListener('click', () => redoStage(b, b.dataset.redo)));
   $('#stages').querySelectorAll('[data-retry]').forEach(el =>
     el.addEventListener('click', async () => {
       await api(`/api/process/retry-failed?stage=${el.dataset.retry}`, { method: 'POST' })
@@ -1116,6 +1124,48 @@ function renderPipeline(d) {
   else if (!running) note.textContent =
     'Scanning a folder finds photos. Indexing is what makes them searchable.';
   else note.textContent = '';
+}
+
+/* Stages are keyed on what they have already done, which is what makes
+   indexing resumable -- and what makes a new model change nothing at all until
+   something says "do it again for everything". These say what that costs. */
+const REDO_WARNS = {
+  thumbs: 'Every cached preview is deleted and made again at the current size ' +
+          'and format.\n\nPhotos on a drive that is not plugged in lose their ' +
+          'preview until it is back.',
+  embed: 'Every stored vector is thrown away and computed again with the current ' +
+         'model.\n\nSearching by meaning falls back to word matching until the ' +
+         'run finishes.',
+  faces: 'Every detected face is thrown away and found again with the current ' +
+         'model.\n\nPeople you named and faces you ignored are kept.',
+  caption: 'Every photo is described again with the current model.\n\nCaptions ' +
+           'and tags you edited yourself are kept. This is the slow one — every ' +
+           'photo goes through the vision model again.',
+};
+
+async function redoStage(btn, stage) {
+  const name = (STAGE_INFO[stage]?.name || stage).toLowerCase();
+  if (!confirm(`Redo ${name} for every photo?\n\n${REDO_WARNS[stage] || ''}`)) return;
+  const note = $('#runnote');
+  btn.disabled = true;
+  note.className = 'note';
+  note.textContent = 'clearing…';
+  try {
+    const r = await api('/api/process/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, rebuild: true, start: true }),
+    });
+    const gone = Object.entries(r.discarded || {})
+      .filter(([, n]) => n).map(([what, n]) => `${n} ${what}`).join(', ');
+    note.textContent = `Queued ${r.requeued} photos for ${STAGE_INFO[stage]?.name || stage}` +
+      `${gone ? `, and threw away ${gone}` : ''}.` +
+      `${r.started ? '' : ' Something else is running — press Run when it finishes.'}`;
+    loadPipeline();
+  } catch (e) {
+    note.classList.add('bad');
+    note.textContent = e.message;
+    btn.disabled = false;
+  }
 }
 
 function summarise(results) {
@@ -1354,25 +1404,40 @@ function collectSettings() {
   return out;
 }
 
-function markDirty() {
+function changedKeys() {
   const now = collectSettings();
   const changed = [];
   for (const [sec, vals] of Object.entries(now))
     for (const [k, v] of Object.entries(vals))
       if (JSON.stringify(v) !== JSON.stringify(cfgData.config[sec][k])) changed.push(`${sec}.${k}`);
+  return changed;
+}
 
+/* Which stages the pending edits invalidate. Saving a new model is easy; what
+   is easy to miss is that every photo already indexed still holds the old
+   one's output, and nothing re-derives it on its own. */
+const staleStages = (changed) =>
+  [...new Set(changed.map(c => cfgData.reindex_required[c]).filter(Boolean))];
+
+function markDirty() {
+  const changed = changedKeys();
   $('#settings-save').disabled = !changed.length;
   const note = $('#savenote');
   const restart = changed.filter(c => cfgData.restart_required[c]);
-  const reindex = [...new Set(changed.map(c => cfgData.reindex_required[c]).filter(Boolean))];
+  const reindex = staleStages(changed);
   if (!changed.length) { note.textContent = `Stored in ${cfgData.path}`; return; }
   note.textContent = `${changed.length} change${changed.length > 1 ? 's' : ''}` +
     (restart.length ? ` · ${restart.join(', ')} take effect after a restart` : '') +
-    (reindex.length ? ` · re-run ${reindex.join(' and ')} to apply to existing photos` : '');
+    (reindex.length
+      ? ` · photos already indexed need ${reindex.join(' and ')} redone to use it`
+      : '');
 }
 
 async function saveSettings() {
   const btn = $('#settings-save');
+  // Worked out before the save, because saving replaces cfgData with the new
+  // values and there is then nothing left to compare against.
+  const stale = staleStages(changedKeys());
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
@@ -1385,12 +1450,39 @@ async function saveSettings() {
     renderPaths(d.paths);
     $('#savenote').textContent = 'Saved.';
     loadHealth();  // a new base_url or model is exactly when this matters
+    if (stale.length) await offerRedo(stale);
   } catch (e) {
     alert(e.message);
     btn.disabled = false;
   } finally {
     btn.textContent = 'Save';
   }
+}
+
+/* The moment a setting is saved is the moment its stage is out of date, and
+   it is the only moment the person is definitely thinking about it. Offering it
+   here beats leaving them to discover on the Library tab that nothing changed. */
+async function offerRedo(stages) {
+  const names = stages.map(s => (STAGE_INFO[s]?.name || s).toLowerCase());
+  if (!confirm(
+    `Saved. Photos already indexed still hold the old settings.\n\n` +
+    `Redo ${names.join(' and ')} for every photo now? Nothing you typed or ` +
+    `named is affected.`)) {
+    $('#savenote').textContent =
+      `Saved. New photos use the new settings; press Redo all on the Library ` +
+      `tab to apply them to the ones you already have.`;
+    return;
+  }
+  // Queue every stage first and start once: the runner takes one run at a time,
+  // so starting them one by one would have the second refused.
+  for (const stage of stages)
+    await api('/api/process/reset', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, rebuild: true, start: false }),
+    }).catch(e => alert(e.message));
+  await startRun(stages);
+  $('#savenote').textContent = `Saved. Redoing ${names.join(' and ')} — ` +
+    `watch it on the Library tab.`;
 }
 
 function renderPaths(paths) {
@@ -1425,7 +1517,6 @@ const TOOLS = {
     beside: $('#sc-beside').checked, overwrite: $('#sc-overwrite').checked }],
   'sidecar-import': () => ['/api/sidecar/import', {}],
   'prune': () => ['/api/prune', { keep_missing: $('#pr-keep').checked }],
-  'rebuild-thumbs': () => ['/api/process/reset', { stage: 'thumbs', rebuild: true }],
   'retry': () => ['/api/process/retry-failed', {}],
 };
 
@@ -1435,8 +1526,6 @@ const TOOL_SAID = {
   'sidecar-import': r => `Read ${r.found} sidecars, imported ${r.tags} keywords.`,
   'prune': r => r.dropped ? `Dropped ${r.dropped} photos with no file left anywhere.`
                           : 'Nothing to prune.',
-  'rebuild-thumbs': r => `Cleared ${r.removed} cached files and queued ${r.requeued} ` +
-    `photos. Starting now — watch it on the Library tab.`,
   'retry': r => r.requeued ? `Put ${r.requeued} failed jobs back in the queue.`
                            : 'No failed jobs to retry.',
 };
@@ -1444,10 +1533,6 @@ const TOOL_SAID = {
 document.querySelectorAll('[data-tool]').forEach(b =>
   b.addEventListener('click', async () => {
     const tool = b.dataset.tool;
-    if (tool === 'rebuild-thumbs' && !confirm(
-      'Delete every cached thumbnail and make them again?\n\n' +
-      'Your photos are not touched. Anything on a drive that is currently ' +
-      'unplugged loses its preview until that drive is back.')) return;
     if (tool === 'prune' && !confirm(
       'Drop photos that have no readable file left anywhere?\n\n' +
       'Nothing on disk is deleted. Photos on a disconnected drive are offline, ' +
@@ -1464,8 +1549,6 @@ document.querySelectorAll('[data-tool]').forEach(b =>
       });
       note.textContent = TOOL_SAID[tool](r);
       if (r.errors?.length) note.textContent += ` First error: ${r.errors[0]}`;
-      // Requeueing only fills the queue; something still has to drain it.
-      if (tool === 'rebuild-thumbs' && r.requeued) await startRun(['thumbs']);
     } catch (e) {
       note.classList.add('bad');
       note.textContent = e.message;

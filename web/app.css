@@ -377,6 +377,12 @@ button.ghostbtn:disabled{opacity:.4;cursor:not-allowed}
 .stagecard.now{border-color:var(--sem);box-shadow:0 0 0 1px var(--sem)}
 .stagehd{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .stagehd b{font-size:13px}
+/* Redo sits beside Run but must never be the button you hit by accident: it is
+   quieter until you are actually pointing at it. */
+.stageacts{display:flex;gap:6px;flex:none}
+.stageacts .ghostbtn{padding:6px 10px;font-size:11.5px}
+.stageacts .danger{border-color:transparent;color:var(--faint)}
+.stageacts .danger:hover{color:var(--lex);border-color:var(--lex)}
 .stagecard p{margin:6px 0 10px;font-size:11.5px;color:var(--faint);line-height:1.45}
 .counts{display:flex;flex-wrap:wrap;gap:9px;
   font-family:"JetBrains Mono",monospace;font-size:11px}
