@@ -8,6 +8,7 @@ import numpy as np
 
 from pa.db import repo
 from pa.db.connection import transaction
+from pa.faces import dedupe
 from pa.ingest import scanner, thumbs
 
 
@@ -261,8 +262,18 @@ def run_faces(conn: sqlite3.Connection, cfg, analyzer, limit: int = 2000,
                         "DELETE FROM face WHERE photo_id=? AND confirmed=0 "
                         "AND rejected=0 AND model=?",
                         (photo_id, version))
+                    # ...and since those survived, the detector is about to find
+                    # them again. Inserting the result would put a second copy
+                    # of every named face on the photo -- the person listed
+                    # twice, their count doubled -- and hand back every stranger
+                    # already dismissed. A decision, once made, is the answer
+                    # for that face.
+                    decided = dedupe.decided_boxes(conn, photo_id)
                     for face in faces:
                         x, y, w, h = face.bbox
+                        if decided and dedupe.is_already_decided(
+                                (x, y, w, h), face.src_size, decided):
+                            continue
                         conn.execute(
                             """INSERT INTO face (photo_id, bbox_x, bbox_y, bbox_w, bbox_h,
                                                  det_score, embedding, model,

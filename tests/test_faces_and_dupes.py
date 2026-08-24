@@ -347,3 +347,189 @@ def test_a_group_lists_the_photos_its_faces_came_from(client):
 
 def test_an_unknown_group_has_no_photos(client):
     assert client.get("/api/clusters/999/faces").status_code == 404
+
+
+# ------------------------------------------- the same face, detected twice
+# Faces you named or ignored survive a re-run of detection on purpose. The
+# detector then finds them again, and inserting that result puts a second copy
+# of every decided face on the photo -- the person listed twice, their count
+# doubled, and every dismissed stranger back in the naming queue.
+
+
+def _add_face(conn, face_id, photo_id, box, *, confirmed=0, rejected=0, person=None,
+              src=(1000, 1000)):
+    vec = np.zeros(512, dtype=np.float32).tobytes()
+    conn.execute(
+        """INSERT INTO face (id, photo_id, person_id, bbox_x, bbox_y, bbox_w, bbox_h,
+                             det_score, embedding, model, src_w, src_h,
+                             confirmed, rejected, created_at)
+           VALUES (?,?,?,?,?,?,?,0.9,?,'test',?,?,?,?,0)""",
+        (face_id, photo_id, person, *box, vec, src[0], src[1], confirmed, rejected))
+    conn.commit()
+
+
+def test_a_redetection_of_a_named_face_is_recognised(client, tmp_path):
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    from pa.faces.dedupe import decided_boxes, is_already_decided
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 20, 1, (100, 100, 200, 200), confirmed=1)
+
+    decided = decided_boxes(conn, 1)
+    # The same face found again: identical, and jittered as a detector would.
+    assert is_already_decided((100, 100, 200, 200), (1000, 1000), decided)
+    assert is_already_decided((104, 96, 198, 205), (1000, 1000), decided)
+    # A different person standing next to them is not the same face.
+    assert not is_already_decided((400, 100, 200, 200), (1000, 1000), decided)
+
+
+def test_a_box_measured_against_another_size_still_matches(client, tmp_path):
+    """Detection runs on the view thumbnail when there is one and the original
+    when there is not, so the two copies of one face can be recorded in
+    different coordinate spaces."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    from pa.faces.dedupe import decided_boxes, is_already_decided
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 21, 1, (100, 100, 200, 200), confirmed=1, src=(1000, 1000))
+
+    # The same face on a 4000px original: four times the numbers.
+    assert is_already_decided((400, 400, 800, 800), (4000, 4000), decided_boxes(conn, 1))
+
+
+def test_cleaning_up_keeps_every_decision(client, tmp_path):
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 30, 1, (100, 100, 200, 200), confirmed=1)      # named
+    _add_face(conn, 31, 1, (600, 100, 200, 200), rejected=1)       # ignored
+    _add_face(conn, 32, 1, (100, 100, 200, 200))                   # copy of the named one
+    _add_face(conn, 33, 1, (600, 100, 200, 200))                   # copy of the ignored one
+    _add_face(conn, 34, 1, (100, 700, 150, 150))                   # a genuinely new face
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 2
+    assert {r[0] for r in conn.execute("SELECT id FROM face")} == {30, 31, 34}
+
+
+def test_cleaning_up_twice_removes_nothing_the_second_time(client, tmp_path):
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 40, 1, (100, 100, 200, 200), confirmed=1)
+    _add_face(conn, 41, 1, (100, 100, 200, 200))
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 1
+    assert client.post("/api/faces/dedupe").json()["removed"] == 0
+
+
+def test_running_detection_again_does_not_add_a_second_copy(client, tmp_path):
+    """The end to end version: the stage itself must not re-add what it kept."""
+    from dataclasses import dataclass
+
+    from PIL import Image
+
+    import pa.config as cfgmod
+    from pa.db import repo
+    from pa.db.connection import init_db
+    from pa.ingest import thumbs as thumbmod
+    from pa.jobs import worker
+
+    cfg = cfgmod._cfg
+    conn = init_db(cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 50, 1, (100, 100, 200, 200), confirmed=1)   # you named this one
+    _add_face(conn, 51, 1, (600, 100, 200, 200), rejected=1)    # and dismissed this one
+    path = thumbmod.thumb_path(cfg.paths.thumbs_dir, "hash1", "view",
+                               cfg.thumbs.format.lower())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (1000, 1000)).save(path, cfg.thumbs.format)
+    repo.enqueue(conn, 1, stages=("faces",), reset=True)
+    conn.commit()
+
+    @dataclass
+    class Detected:
+        bbox: tuple
+        det_score: float
+        embedding: np.ndarray
+        src_size: tuple
+
+    class Analyzer:
+        model_version = "test"
+
+        def detect(self, _blob):
+            zero = np.zeros(512, dtype=np.float32)
+            return [
+                Detected((100, 100, 200, 200), 0.9, zero, (1000, 1000)),  # the named one
+                Detected((600, 100, 200, 200), 0.9, zero, (1000, 1000)),  # the dismissed one
+                Detected((100, 700, 150, 150), 0.9, zero, (1000, 1000)),  # someone new
+            ]
+
+    res = worker.run_faces(conn, cfg, Analyzer())
+    assert res.done == 1, res.errors
+
+    rows = conn.execute(
+        "SELECT id, confirmed, rejected FROM face WHERE photo_id=1 ORDER BY id").fetchall()
+    assert [r["id"] for r in rows][:2] == [50, 51], "a decision must survive re-detection"
+    assert len(rows) == 3, "the two it kept were detected again and added a second time"
+
+
+def test_a_copy_that_was_later_named_is_still_a_copy(client, tmp_path):
+    """Naming a proposed group after a re-run marks the duplicate confirmed too,
+    leaving two identical named boxes. Both say the same thing about the same
+    face, so keeping one loses nothing."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    conn.execute("INSERT INTO person (id, name, created_at) VALUES (1,'Ada',0)")
+    _add_face(conn, 60, 1, (100, 100, 200, 200), confirmed=1, person=1)
+    _add_face(conn, 61, 1, (100, 100, 200, 200), confirmed=1, person=1)
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 1
+    assert [r[0] for r in conn.execute("SELECT id FROM face")] == [60], "the older wins"
+
+
+def test_two_people_in_one_box_is_left_for_a_human(client, tmp_path):
+    """Same box, two different names, is a contradiction rather than a copy.
+    Guessing which is right would quietly delete somebody's correction."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    conn.execute("INSERT INTO person (id, name, created_at) VALUES (1,'Ada',0)")
+    conn.execute("INSERT INTO person (id, name, created_at) VALUES (2,'Grace',0)")
+    _add_face(conn, 70, 1, (100, 100, 200, 200), confirmed=1, person=1)
+    _add_face(conn, 71, 1, (100, 100, 200, 200), confirmed=1, person=2)
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 0
+    assert len(conn.execute("SELECT id FROM face").fetchall()) == 2
+
+
+def test_an_ignored_face_and_a_named_one_are_left_alone(client, tmp_path):
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 80, 1, (100, 100, 200, 200), confirmed=1)
+    _add_face(conn, 81, 1, (100, 100, 200, 200), rejected=1)
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 0
+
+
+def test_two_undecided_copies_keep_one(client, tmp_path):
+    """A photo with nobody named on it duplicates just the same, and the copies
+    double every stranger in the naming queue."""
+    import pa.config as cfgmod
+    from pa.db.connection import init_db
+    conn = init_db(cfgmod._cfg.paths.db_path)
+    conn.execute("DELETE FROM face")
+    _add_face(conn, 90, 1, (100, 100, 200, 200))
+    _add_face(conn, 91, 1, (100, 100, 200, 200))
+    _add_face(conn, 92, 1, (500, 500, 200, 200))
+
+    assert client.post("/api/faces/dedupe").json()["removed"] == 1
+    assert {r[0] for r in conn.execute("SELECT id FROM face")} == {90, 92}

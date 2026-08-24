@@ -510,6 +510,27 @@ def create_app() -> FastAPI:
         conn.commit()
         return {"ok": True}
 
+    @app.post("/api/faces/dedupe")
+    def api_dedupe_faces() -> Any:
+        """Remove second detections of faces you already ruled on.
+
+        Re-running detection used to add a fresh copy of every face that had
+        been named or ignored, because those are kept on purpose and nothing
+        recognised the new detection as being the same face. Detection now skips
+        them, but a library that re-ran before that does not heal on its own --
+        short of detecting every face again, which is hours of GPU for a problem
+        that is a box comparison.
+        """
+        from pa.faces import dedupe
+        conn = db()
+        photos = [r[0] for r in conn.execute(
+            "SELECT DISTINCT photo_id FROM face WHERE confirmed=1 OR rejected=1")]
+        removed = dedupe.remove_duplicates(conn)
+        for photo_id in photos:
+            repo.reindex_fts(conn, photo_id)
+        conn.commit()
+        return {"ok": True, "removed": removed}
+
     @app.get("/api/faces/ignored")
     def api_ignored_faces(limit: int = 60) -> Any:
         """Ignoring has to be undoable, so it needs somewhere to be seen.

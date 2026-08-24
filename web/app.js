@@ -1524,6 +1524,7 @@ const TOOLS = {
     beside: $('#sc-beside').checked, overwrite: $('#sc-overwrite').checked }],
   'sidecar-import': () => ['/api/sidecar/import', {}],
   'prune': () => ['/api/prune', { keep_missing: $('#pr-keep').checked }],
+  'dedupe-faces': () => ['/api/faces/dedupe', {}],
   'retry': () => ['/api/process/retry-failed', {}],
 };
 
@@ -1533,6 +1534,9 @@ const TOOL_SAID = {
   'sidecar-import': r => `Read ${r.found} sidecars, imported ${r.tags} keywords.`,
   'prune': r => r.dropped ? `Dropped ${r.dropped} photos with no file left anywhere.`
                           : 'Nothing to prune.',
+  'dedupe-faces': r => r.removed
+    ? `Removed ${r.removed} repeated detections. Everything you named or ignored is as it was.`
+    : 'No duplicates found.',
   'retry': r => r.requeued ? `Put ${r.requeued} failed jobs back in the queue.`
                            : 'No failed jobs to retry.',
 };
