@@ -528,3 +528,32 @@ def test_a_gpu_failure_still_puts_the_batch_back(cfg, embed_queue):
     states = {r[0] for r in embed_queue.execute(
         "SELECT DISTINCT state FROM job WHERE stage='embed'")}
     assert states == {"pending"}, "an out-of-memory batch must stay in the queue"
+
+
+def test_browsing_reports_folders_that_are_already_roots(cfg, client, tmp_path,
+                                                         monkeypatch):
+    """The picker has to ask the library, and the library stores a folder as a
+    drive plus a path relative to it -- so the answer only survives the trip
+    back through whatever letter that drive is mounted under today."""
+    from pa.db import repo
+    from pa.db.connection import init_db
+    from pa.ingest import volumes
+
+    disk = tmp_path / "disk"
+    (disk / "photos" / "2024").mkdir(parents=True)
+    (disk / "other").mkdir()
+    monkeypatch.setattr(volumes, "current_mountpoint",
+                        lambda uuid: disk if uuid == "vol-1" else None)
+
+    conn = init_db(cfg.paths.db_path)
+    volume_id = repo.upsert_volume(conn, "vol-1", "photo drive", str(disk))
+    repo.add_root(conn, volume_id, "photos", "photos", [])
+    conn.commit()
+
+    listing = client.get(f"/api/browse?path={disk}").json()
+    assert {e["name"]: e["library"] for e in listing["entries"]} == {
+        "photos": "root", "other": None}
+
+    inside = client.get(f"/api/browse?path={disk / 'photos'}").json()
+    assert inside["library"] == "root"
+    assert inside["entries"][0]["library"] == "inside"

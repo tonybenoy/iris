@@ -332,6 +332,16 @@ button.danger:hover{color:var(--lex);border-color:var(--lex)}
 .dirs .ct{font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--faint)}
 .dirs .ct.has{color:var(--lex)}
 .dirs .go{color:var(--faint);font-size:16px;padding:0 4px}
+/* Amber for "this is already yours", grey for the softer overlaps: a folder
+   you cannot usefully add should read differently from one that merely
+   touches something you added. */
+.dirs .lib{flex:none;font-family:"JetBrains Mono",monospace;font-size:10px;
+  letter-spacing:.03em;padding:2px 7px;border-radius:999px;border:1px solid var(--line);
+  color:var(--faint);white-space:nowrap}
+.dirs .lib.root{color:var(--lex);border-color:var(--lex)}
+.dirs li[data-library="root"] .nm{color:var(--dim)}
+.pickednote{display:block;margin-top:3px;color:var(--faint);font-size:11px;
+  font-family:Inter,system-ui,sans-serif;white-space:normal}
 .dirs .empty-note{color:var(--faint);padding:18px 12px;font-size:12.5px}
 .modal-ft{display:flex;gap:12px;align-items:center;padding:14px 20px;
   border-top:1px solid var(--line);flex-wrap:wrap}

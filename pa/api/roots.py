@@ -32,6 +32,7 @@ class Entry:
     photos: int = 0          # images directly inside, a hint that this is the folder
     children: int = 0
     readable: bool = True
+    library: str | None = None   # see library_state()
 
 
 @dataclass
@@ -41,6 +42,36 @@ class Listing:
     entries: list[Entry] = field(default_factory=list)
     photos_here: int = 0
     shortcuts: list[dict] = field(default_factory=list)
+    library: str | None = None
+
+
+def _comparable(path: str | Path) -> str:
+    """A path in the one spelling comparisons can use. normcase is what makes
+    C:\\Users and c:\\users the same folder on Windows and two different ones
+    everywhere else."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def library_state(path: str | Path, roots: list[str]) -> str | None:
+    """How this folder relates to what has already been added.
+
+    Adding the same photos twice is easy to do by accident and tedious to undo,
+    and the picker gave no sign of it: every folder looked equally new. The
+    three answers worth having are different warnings, not one.
+
+    "root"     -- this exact folder was added.
+    "inside"   -- something above it was, so its photos are already indexed.
+    "contains" -- something below it was, so adding this overlaps that.
+    """
+    here = _comparable(path)
+    keyed = [_comparable(r) for r in roots]
+    if here in keyed:
+        return "root"
+    if any(here.startswith(root + os.sep) for root in keyed):
+        return "inside"
+    if any(root.startswith(here + os.sep) for root in keyed):
+        return "contains"
+    return None
 
 
 def _is_image(name: str) -> bool:
@@ -108,7 +139,7 @@ def shortcuts() -> list[dict]:
     return out
 
 
-def browse(raw: str | None) -> Listing:
+def browse(raw: str | None, roots: list[str] | None = None) -> Listing:
     path = Path(raw).expanduser() if raw else Path.home()
     try:
         path = path.resolve(strict=True)
@@ -127,7 +158,8 @@ def browse(raw: str | None) -> Listing:
                         if e.name.startswith(".") or e.name in SKIP_DIRS:
                             continue
                         images, subdirs = _peek(Path(e.path))
-                        entries.append(Entry(e.name, e.path, images, subdirs))
+                        entries.append(Entry(e.name, e.path, images, subdirs,
+                                             library=library_state(e.path, roots or [])))
                     elif _is_image(e.name):
                         photos_here += 1
                 except OSError:
@@ -142,4 +174,5 @@ def browse(raw: str | None) -> Listing:
         entries=entries,
         photos_here=photos_here,
         shortcuts=shortcuts(),
+        library=library_state(path, roots or []),
     )

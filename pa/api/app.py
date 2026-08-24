@@ -712,8 +712,16 @@ def create_app() -> FastAPI:
         from dataclasses import asdict
 
         from pa.api import roots as rootlib
+        # Where the library already reaches, so the picker can say so rather
+        # than letting the same photos be added twice.
+        conn = db()
+        known = []
+        for r in repo.list_roots(conn):
+            mount = volumes.current_mountpoint(r["volume_uuid"])
+            if mount is not None:
+                known.append(str(mount / r["rel_path"]) if r["rel_path"] else str(mount))
         try:
-            return asdict(rootlib.browse(path))
+            return asdict(rootlib.browse(path, known))
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from None
         except (FileNotFoundError, NotADirectoryError) as exc:

@@ -928,7 +928,25 @@ async function loadLibraryCounts() {
 }
 
 /* ------------------------------------------------------------ folder picker */
-const picker = { path: null, parent: null, selected: null };
+const picker = { path: null, parent: null, selected: null, library: null };
+
+/* Adding the same photos twice is easy to do by accident and tedious to undo,
+   and every folder used to look equally new. These are three different
+   warnings, not one. */
+const LIBRARY_TAG = {
+  root: { label: 'in your library', hint: 'You added this exact folder.' },
+  inside: { label: 'already covered',
+            hint: 'A folder above this one is in your library, so these photos ' +
+                  'are already indexed.' },
+  contains: { label: 'contains a folder you added',
+              hint: 'Something below this is already in your library. Adding ' +
+                    'this as well would cover those photos twice.' },
+};
+
+const libraryTag = (state) => {
+  const tag = LIBRARY_TAG[state];
+  return tag ? `<span class="lib ${state}" title="${esc(tag.hint)}">${tag.label}</span>` : '';
+};
 
 /* Paths come back in the server's own spelling, which is C:\\Users\\you on
    Windows. Splitting those on "/" alone produced one crumb holding the entire
@@ -977,7 +995,7 @@ async function showDir(path) {
     return;
   }
   picker.path = d.path;
-  select(d.path, d.photos_here);
+  select(d.path, d.photos_here, d.library);
 
 
   $('#shortcuts').innerHTML = d.shortcuts.map(s =>
@@ -998,8 +1016,10 @@ async function showDir(path) {
 
   $('#dirs').innerHTML = d.entries.length
     ? d.entries.map(e => `
-        <li data-path="${esc(e.path)}" data-photos="${e.photos}">
+        <li data-path="${esc(e.path)}" data-photos="${e.photos}"
+            data-library="${esc(e.library || '')}">
           <span class="nm">${esc(e.name)}</span>
+          ${libraryTag(e.library)}
           <span class="ct ${e.photos ? 'has' : ''}">${
             e.photos ? `${e.photos}${e.photos > 400 ? '+' : ''} photos` : ''}</span>
           ${e.children ? '<span class="go">&rsaquo;</span>' : ''}
@@ -1015,17 +1035,25 @@ async function showDir(path) {
       if (ev.target.classList.contains('go')) { showDir(li.dataset.path); return; }
       $('#dirs').querySelectorAll('li').forEach(x => x.classList.remove('on'));
       li.classList.add('on');
-      select(li.dataset.path, +li.dataset.photos);
+      select(li.dataset.path, +li.dataset.photos, li.dataset.library || null);
     });
     li.addEventListener('dblclick', () => showDir(li.dataset.path));
   });
 }
 
-function select(path, photos) {
+function select(path, photos, library) {
   picker.selected = path;
+  picker.library = library || null;
   $('#picked').textContent = path;
-  $('#picker-add').disabled = false;
-  $('#picker-add').textContent = photos
+  $('#picked-note').textContent = library ? LIBRARY_TAG[library].hint : '';
+  // Adding the same folder twice is the one case with nothing to gain, so it is
+  // refused. Overlapping is sometimes deliberate -- a sub-folder on its own
+  // schedule -- so that is said plainly and still allowed.
+  const already = library === 'root';
+  $('#picker-add').disabled = already;
+  $('#picker-add').textContent = already
+    ? 'Already added'
+    : photos
     ? `Add to library (${photos}${photos > 400 ? '+' : ''} photos here)`
     : 'Add to library';
 }

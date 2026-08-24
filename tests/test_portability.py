@@ -136,3 +136,53 @@ def test_the_picker_can_always_walk_back_up(tmp_path):
     assert seen[0] == str(deep)
     assert str(tmp_path / "photos") in seen
     assert browse(seen[-1]).parent is None, "walking up must end at a root, not loop"
+
+
+# ------------------------------------------- what the picker already covers
+def test_the_picker_says_which_folders_are_already_in_the_library(tmp_path):
+    """Every folder used to look equally new, so adding the same photos twice
+    was easy to do by accident and tedious to undo."""
+    from pa.api.roots import browse
+
+    added = tmp_path / "photos"
+    (added / "2024").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    roots = [str(added)]
+
+    listing = browse(str(tmp_path), roots)
+    states = {e.name: e.library for e in listing.entries}
+    assert states["photos"] == "root", "the folder you added"
+    assert states["elsewhere"] is None
+    assert listing.library == "contains", "this folder holds one you added"
+
+    inside = browse(str(added), roots)
+    assert inside.library == "root"
+    assert {e.name: e.library for e in inside.entries} == {"2024": "inside"}
+
+
+def test_a_folder_is_only_covered_by_a_real_ancestor(tmp_path):
+    """Prefix matching on strings makes /photos_old a child of /photos."""
+    from pa.api.roots import library_state
+
+    root = str(tmp_path / "photos")
+    assert library_state(str(tmp_path / "photos_old"), [root]) is None
+    assert library_state(str(tmp_path / "photos" / "2024"), [root]) == "inside"
+
+
+def test_case_only_differences_are_the_same_folder_on_windows(tmp_path):
+    import os
+
+    from pa.api.roots import library_state
+
+    root = str(tmp_path / "Photos")
+    same = library_state(str(tmp_path / "photos"), [root]) == "root"
+    assert same is (os.path.normcase("A") == "a")
+
+
+def test_no_roots_means_no_tags(tmp_path):
+    from pa.api.roots import browse
+
+    (tmp_path / "anything").mkdir()
+    listing = browse(str(tmp_path), [])
+    assert listing.library is None
+    assert all(e.library is None for e in listing.entries)
