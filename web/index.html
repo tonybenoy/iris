@@ -65,8 +65,22 @@
       <p>Name a group once. New photos of that person are matched automatically.</p>
     </div>
     <div id="named" class="facerow"></div>
+
     <h3 class="sub" id="unnamed-h" hidden>Waiting for a name</h3>
+    <!-- Lives in the markup, bound once. It used to be created inside the
+         render function, which inserted a fresh copy on every redraw and left
+         the earlier ones in the document with duplicate ids. -->
+    <div class="mergebar" id="mergebar" hidden>
+      <span id="mergecount"></span>
+      <input id="mergename" placeholder="Name them (optional)" aria-label="Name for merged person">
+      <button id="mergego">Merge</button>
+      <button id="mergeignore" class="ghost">Ignore these</button>
+      <button class="ghost" id="mergecancel">Cancel</button>
+    </div>
     <div id="clusters" class="clusters"></div>
+
+    <h3 class="sub" id="ignored-h" hidden>Ignored</h3>
+    <div id="ignored" class="clusters"></div>
   </section>
 
   <section id="places-view" hidden>
@@ -209,7 +223,10 @@
   <button class="lb-close" aria-label="Close">&times;</button>
   <button class="lb-nav prev" aria-label="Previous">&#8249;</button>
   <button class="lb-nav next" aria-label="Next">&#8250;</button>
-  <figure class="lb-stage"><img id="lb-img" alt=""></figure>
+  <figure class="lb-stage">
+    <img id="lb-img" alt="">
+    <p id="lb-note" class="lb-note" hidden></p>
+  </figure>
   <aside class="lb-rail" id="lb-rail"></aside>
 </div>
 

@@ -152,13 +152,15 @@ CREATE TABLE IF NOT EXISTS face (
     embedding       BLOB NOT NULL,          -- float32 x512, source of truth; LanceDB is derived
     model           TEXT NOT NULL,
     confirmed       INTEGER NOT NULL DEFAULT 0,
-    rejected        INTEGER NOT NULL DEFAULT 0,
+    rejected        INTEGER NOT NULL DEFAULT 0,  -- a face you said you do not care about
+    ignored_as      INTEGER,        -- the cluster it was ignored as, so undo restores the group
     created_at      INTEGER NOT NULL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_face_photo   ON face(photo_id);
 CREATE INDEX IF NOT EXISTS idx_face_person  ON face(person_id);
 CREATE INDEX IF NOT EXISTS idx_face_cluster ON face(cluster_id) WHERE person_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_face_ignored ON face(ignored_as) WHERE rejected = 1;
 
 -- ------------------------------------------------------------------ embeddings
 CREATE TABLE IF NOT EXISTS photo_embedding (

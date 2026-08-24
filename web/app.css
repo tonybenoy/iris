@@ -448,3 +448,26 @@ button.ghostbtn:disabled{opacity:.4;cursor:not-allowed}
 @media (max-width:720px){
   .field{grid-template-columns:1fr;gap:8px}
 }
+
+/* Shown in place of the image when a photo has no cached preview and its
+   original cannot be reached either. */
+.lb-note{max-width:44ch;text-align:center;color:var(--faint);font-size:13px;
+  line-height:1.6;margin:0}
+
+/* ---------------------------------------------------- ignoring faces */
+.clusterhd{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.cluster .ignore{font-size:11px;color:var(--faint);border:1px solid transparent;
+  border-radius:5px;padding:3px 8px}
+.cluster .ignore:hover{color:var(--lex);border-color:var(--lex)}
+.cluster .ignore:disabled{opacity:.4;cursor:not-allowed}
+/* Dimmed and drained of colour, so an ignored group never reads as a task. */
+.cluster.ignored{opacity:.6}
+.cluster.ignored:hover{opacity:1}
+.cluster.ignored .faces img{filter:grayscale(1)}
+.cluster.ignored .ghostbtn{margin-top:10px}
+.facelb .ig{position:absolute;left:0;right:0;bottom:18px;font-size:9px;
+  letter-spacing:.04em;text-transform:uppercase;color:var(--canvas);
+  background:rgba(237,237,239,.86);padding:2px 0;opacity:0;transition:opacity .15s}
+.facelb:hover .ig{opacity:1}
+.facelb .ig:hover{background:var(--lex)}
+.mergebar .ghost{white-space:nowrap}

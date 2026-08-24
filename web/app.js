@@ -204,16 +204,53 @@ addEventListener('scroll', () => {
 });
 
 /* --------------------------------------------------------------- lightbox */
+/* The cached preview first, then the original.
+
+   That order is the whole point of the thumbnail cache: it is local, already
+   downscaled, and is what lets a photo on an unplugged drive still open. The
+   original is the fallback for photos that have not been through the thumbnail
+   stage yet -- which needs the drive attached, so when that fails too the
+   reason is worth saying rather than showing a broken image icon.
+
+   Only the lightbox falls back this way. The grid must not: it would pull a
+   full-size original for every tile on screen. */
+function showPhoto(p) {
+  const img = $('#lb-img'), note = $('#lb-note');
+  img.hidden = false;
+  note.hidden = true;
+
+  const giveUp = () => {
+    img.onerror = null;
+    img.hidden = true;
+    note.hidden = false;
+    // openLightbox fills in `state.detail` right after this; if the file rows
+    // are already there they say whether the drive is the problem.
+    const offline = state.detail?.files?.length &&
+                    state.detail.files.every(f => !f.online);
+    note.textContent = offline
+      ? 'This photo has no cached preview yet, and the drive it lives on is not connected.'
+      : 'No preview for this photo yet — run the Thumbnails stage on the Library tab.';
+  };
+
+  img.onerror = () => {
+    img.onerror = giveUp;
+    img.src = `/api/original/${p.id}`;
+  };
+  img.src = `/api/thumb/${p.blake3}/view`;
+}
+
 async function openLightbox(i) {
   const p = state.results[i];
   if (!p) return;
   state.cursor = i;
+  state.detail = null;   // belongs to the previous photo until the fetch lands
   $('#lightbox').hidden = false;
-  $('#lb-img').src = `/api/thumb/${p.blake3}/view`;
+  showPhoto(p);
   $('#lb-img').alt = p.caption || p.filename || '';
   $('#lb-rail').innerHTML = '<div class="lb-sec">loading</div>';
   try {
     const d = await api(`/api/photos/${p.id}`);
+    state.detail = d;   // showPhoto reads files[].online to explain a failure
     const a = d.annotation || {}, ph = d.photo;
     const row = (k, v) => v ? `<div class="row"><span>${esc(k)}</span><span>${esc(v)}</span></div>` : '';
     const named = d.faces.filter(f => f.person_name).map(f => f.person_name);
@@ -236,6 +273,8 @@ async function openLightbox(i) {
            <img src="/api/face/${f.id}" alt="">
            <b>${esc(f.person_name || 'unnamed')}</b>
            ${f.person_name ? '<button class="x" title="Not this person">&times;</button>' : ''}
+           <button class="ig" title="Ignore this face - someone you do not need to name">
+             ignore</button>
          </div>`).join('')}</div>` : '') +
       `<div class="lb-sec">details</div>` +
       row('taken', when(ph.taken_at)) + row('scene', a.scene) + row('setting', a.setting) +
@@ -365,6 +404,16 @@ function wireTagEditor(photoId, d) {
       card.querySelector('b').textContent = 'unnamed';
       btn.remove();
     }));
+
+  /* Detaching says "that is the wrong name" and sends the face back to the
+     queue. Ignoring says "I do not care who this is" and keeps it out. */
+  $('#lb-rail').querySelectorAll('.facelb .ig').forEach(btn =>
+    btn.addEventListener('click', async () => {
+      const card = btn.closest('.facelb');
+      await api(`/api/faces/${card.dataset.face}/ignore`, { method: 'POST' })
+        .catch(e => alert(e.message));
+      card.remove();
+    }));
 }
 const closeLb = () => { $('#lightbox').hidden = true; $('#lb-img').src = ''; };
 const step = (d) => {
@@ -420,13 +469,29 @@ async function loadPeople() {
   $('#unnamed-h').hidden = cl.clusters.length === 0;
   $('#clusters').innerHTML = cl.clusters.map(c =>
     `<div class="cluster" data-id="${c.cluster_id}">
-       <label class="pick"><input type="checkbox"> same person as…</label>
+       <div class="clusterhd">
+         <label class="pick"><input type="checkbox"> same person as…</label>
+         <button class="ignore" data-ignore="${c.cluster_id}"
+                 title="Someone you do not need to name">Ignore</button>
+       </div>
        <div class="n">${c.count} face${c.count === 1 ? '' : 's'}</div>
        <div class="faces">${c.faces.slice(0, 5).map(f =>
          `<div><img src="/api/face/${f.id}" alt=""></div>`).join('')}</div>
        <form><input placeholder="Who is this?" aria-label="Name this person"><button>Name</button></form>
      </div>`).join('');
-  wireMerge();
+  refreshMergeBar();
+
+  // Group photos are mostly strangers. Without this the queue never empties,
+  // because every clustering run proposes the same people you already skipped.
+  $('#clusters').querySelectorAll('[data-ignore]').forEach(b =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      await api(`/api/clusters/${b.dataset.ignore}/ignore`, { method: 'POST' })
+        .catch(e => alert(e.message));
+      loadPeople();
+    }));
+
+  loadIgnored();
   $('#clusters').querySelectorAll('.cluster form').forEach(f =>
     f.addEventListener('submit', async e => {
       e.preventDefault();
@@ -442,41 +507,91 @@ async function loadPeople() {
 }
 
 /* Clustering splits one person across several groups whenever lighting or angle
-   varies, so merging is the most common correction on this screen. */
-function wireMerge() {
-  const boxes = [...document.querySelectorAll('.cluster .pick input')];
-  const bar = document.createElement('div');
-  bar.className = 'mergebar';
-  bar.hidden = true;
-  bar.innerHTML = `<span id="mergecount"></span>
-    <input id="mergename" placeholder="Name them (optional)" aria-label="Name for merged person">
-    <button id="mergego">Merge</button>
-    <button class="ghost" id="mergecancel">Cancel</button>`;
-  $('#clusters').before(bar);
+   varies, so merging is the most common correction on this screen.
 
-  const picked = () => boxes.filter(b => b.checked)
+   The bar and its buttons live in the markup and are bound exactly once, here.
+   They used to be built inside the render function, which inserted a fresh bar
+   on every redraw and left the previous ones in the document. From the second
+   redraw onwards, `$('#mergego')` matched the FIRST bar -- a stale one, holding
+   a closure over checkboxes that were no longer on the page -- so the visible
+   bar's Merge button had no handler at all and the button that did have one was
+   wired to elements that no longer existed. Selecting groups appeared to work
+   and merging silently did nothing. */
+const pickedClusters = () =>
+  [...document.querySelectorAll('#clusters .pick input:checked')]
     .map(b => +b.closest('.cluster').dataset.id);
-  const refresh = () => {
-    const n = picked().length;
-    bar.hidden = n < 1;
-    $('#mergecount').textContent = `${n} group${n === 1 ? '' : 's'} selected`;
-    boxes.forEach(b => b.closest('.cluster').classList.toggle('picked', b.checked));
-  };
-  boxes.forEach(b => b.addEventListener('change', refresh));
 
-  $('#mergecancel').addEventListener('click', () => {
-    boxes.forEach(b => { b.checked = false; });
-    refresh();
-  });
-  $('#mergego').addEventListener('click', async () => {
-    const ids = picked();
-    if (ids.length < 2) { alert('Pick at least two groups to merge.'); return; }
+function refreshMergeBar() {
+  const n = pickedClusters().length;
+  $('#mergebar').hidden = n < 1;
+  $('#mergecount').textContent = `${n} group${n === 1 ? '' : 's'} selected`;
+  document.querySelectorAll('#clusters .cluster').forEach(c =>
+    c.classList.toggle('picked', !!c.querySelector('.pick input:checked')));
+}
+
+/* Delegated, so it keeps working across every redraw without rebinding. */
+$('#clusters').addEventListener('change', e => {
+  if (e.target.matches('.pick input')) refreshMergeBar();
+});
+
+$('#mergecancel').addEventListener('click', () => {
+  document.querySelectorAll('#clusters .pick input').forEach(b => { b.checked = false; });
+  refreshMergeBar();
+});
+
+$('#mergego').addEventListener('click', async () => {
+  const ids = pickedClusters();
+  if (ids.length < 2) { alert('Pick at least two groups to merge.'); return; }
+  const btn = $('#mergego');
+  btn.disabled = true;
+  try {
     await api('/api/clusters/merge', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cluster_ids: ids, name: $('#mergename').value.trim() || null })
     });
-    loadPeople();
-  });
+    $('#mergename').value = '';
+    await loadPeople();
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('#mergeignore').addEventListener('click', async () => {
+  const ids = pickedClusters();
+  if (!ids.length) return;
+  if (!confirm(`Ignore ${ids.length} group${ids.length === 1 ? '' : 's'}?\n\n` +
+               `Their faces stop appearing here and are left out of future ` +
+               `grouping. Nothing is deleted, and you can bring them back.`)) return;
+  for (const id of ids)
+    await api(`/api/clusters/${id}/ignore`, { method: 'POST' }).catch(() => {});
+  await loadPeople();
+});
+
+/* Ignoring must be undoable and visible, or it is just a way to lose faces. */
+async function loadIgnored() {
+  let d;
+  try { d = await api('/api/faces/ignored'); } catch { return; }
+  const has = d.groups.length || d.loose;
+  $('#ignored-h').hidden = !has;
+  $('#ignored').innerHTML = d.groups.map(g =>
+    `<div class="cluster ignored" data-id="${g.cluster_id}">
+       <div class="n">${g.count} face${g.count === 1 ? '' : 's'}</div>
+       <div class="faces">${g.faces.map(f =>
+         `<div><img src="/api/face/${f.id}" alt=""></div>`).join('')}</div>
+       <button class="ghostbtn" data-restore="${g.cluster_id}">Bring back</button>
+     </div>`).join('') +
+    (d.loose ? `<p class="note">${d.loose} face${d.loose === 1 ? '' : 's'} ` +
+               `ignored one at a time, from the photo view.</p>` : '');
+
+  $('#ignored').querySelectorAll('[data-restore]').forEach(b =>
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      await api(`/api/faces/ignored/${b.dataset.restore}/restore`, { method: 'POST' })
+        .catch(e => alert(e.message));
+      loadPeople();
+    }));
 }
 
 /* ------------------------------------------------------------- duplicates */
@@ -510,6 +625,12 @@ async function loadDupes() {
           `<img src="/api/thumb/${p.blake3}/grid" alt="${esc(p.filename || '')}">`).join('')}</div>
         <div class="locs">${g.photos.map(p => esc(p.filename || '')).join('\n')}</div>
       </div>`).join('') : '<div class="empty">No near-identical photos found.</div>');
+    // A RAW+JPEG pair is the camera doing what it was told, not waste. Saying
+    // how many were left out beats silently hiding them.
+    if (d.format_pairs_skipped)
+      parts.push(`<p class="note">Skipped ${d.format_pairs_skipped} RAW+JPEG ` +
+        `pair${d.format_pairs_skipped === 1 ? '' : 's'} — the same shot saved in ` +
+        `two formats, which is not a duplicate worth reclaiming.</p>`);
   }
   if (!d.exact.length && !near) parts.push('<div class="empty">No photo is stored twice.</div>');
   $('#dupes').innerHTML = parts.join('');

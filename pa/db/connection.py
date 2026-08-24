@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 
@@ -78,7 +78,18 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     fresh = conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='photo'"
     ).fetchone()[0] == 0
-    conn.executescript(SCHEMA_SQL.read_text())
+    if fresh:
+        # Only for a new database. schema.sql describes the current shape, which
+        # includes columns that older databases reach by migration -- and its
+        # CREATE INDEX statements name those columns directly. Running it over an
+        # existing database executed those indexes *before* the migration that
+        # adds the column, so every library from a previous version failed to
+        # open with "no such column". Migrations are what carry an existing
+        # database forward; that is the whole reason they exist.
+        conn.executescript(SCHEMA_SQL.read_text())
+    else:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL) "
+                     "STRICT")
     row = conn.execute("SELECT version FROM schema_version").fetchone()
     if row is None:
         # A brand new database already has the latest shape from schema.sql;

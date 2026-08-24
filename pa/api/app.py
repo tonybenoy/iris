@@ -391,6 +391,79 @@ def create_app() -> FastAPI:
         n = conn.execute("SELECT COUNT(*) FROM face WHERE cluster_id=?", (target,)).fetchone()[0]
         return {"ok": True, "cluster_id": target, "faces": n}
 
+    # Group photos are full of strangers. Without a way to say "not a person I
+    # care about", they come back to the naming queue after every clustering
+    # run and there is no way to ever finish naming. `face.rejected` already
+    # excluded them everywhere -- clustering, the queue, people counts and
+    # sidecar export -- but nothing could set it.
+    @app.post("/api/clusters/{cluster_id}/ignore")
+    def api_ignore_cluster(cluster_id: int) -> Any:
+        conn = db()
+        photos = [r["photo_id"] for r in conn.execute(
+            "SELECT DISTINCT photo_id FROM face WHERE cluster_id=?", (cluster_id,))]
+        n = conn.execute(
+            "UPDATE face SET rejected=1, ignored_as=?, cluster_id=NULL WHERE cluster_id=?",
+            (cluster_id, cluster_id)).rowcount
+        if not n:
+            raise HTTPException(404, "no such group, or it is already gone")
+        for pid in photos:
+            repo.reindex_fts(conn, pid)
+        conn.commit()
+        return {"ok": True, "ignored": n}
+
+    @app.post("/api/faces/{face_id}/ignore")
+    def api_ignore_face(face_id: int) -> Any:
+        conn = db()
+        row = conn.execute("SELECT photo_id FROM face WHERE id=?", (face_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "no such face")
+        # A face ignored one at a time never belonged to a group, so ignored_as
+        # stays NULL and it shows in the "loose" count rather than as a group.
+        conn.execute("UPDATE face SET rejected=1, person_id=NULL, cluster_id=NULL, "
+                     "confirmed=0 WHERE id=?", (face_id,))
+        repo.reindex_fts(conn, row["photo_id"])
+        conn.commit()
+        return {"ok": True}
+
+    @app.get("/api/faces/ignored")
+    def api_ignored_faces(limit: int = 60) -> Any:
+        """Ignoring has to be undoable, so it needs somewhere to be seen.
+
+        Grouped by the cluster they were in when ignored, so undoing puts back
+        the same group that was dismissed rather than a heap of loose faces.
+        """
+        conn = db()
+        rows = conn.execute(
+            """SELECT ignored_as AS cluster_id, COUNT(*) n FROM face
+               WHERE rejected=1 AND ignored_as IS NOT NULL
+               GROUP BY ignored_as ORDER BY n DESC LIMIT ?""", (limit,)).fetchall()
+        out = []
+        for r in rows:
+            faces = conn.execute(
+                """SELECT id, det_score FROM face WHERE ignored_as=? AND rejected=1
+                   ORDER BY det_score DESC LIMIT 6""", (r["cluster_id"],)).fetchall()
+            out.append({"cluster_id": r["cluster_id"], "count": r["n"],
+                        "faces": [dict(f) for f in faces]})
+        loose = conn.execute(
+            "SELECT COUNT(*) FROM face WHERE rejected=1 AND ignored_as IS NULL").fetchone()[0]
+        return {"groups": out, "loose": loose}
+
+    @app.post("/api/faces/ignored/{cluster_id}/restore")
+    def api_restore_ignored(cluster_id: int) -> Any:
+        conn = db()
+        photos = [r["photo_id"] for r in conn.execute(
+            "SELECT DISTINCT photo_id FROM face WHERE ignored_as=? AND rejected=1",
+            (cluster_id,))]
+        n = conn.execute(
+            "UPDATE face SET rejected=0, cluster_id=ignored_as, ignored_as=NULL "
+            "WHERE ignored_as=? AND rejected=1", (cluster_id,)).rowcount
+        if not n:
+            raise HTTPException(404, "nothing ignored under that group")
+        for pid in photos:
+            repo.reindex_fts(conn, pid)
+        conn.commit()
+        return {"ok": True, "restored": n}
+
     @app.post("/api/faces/{face_id}/detach")
     def api_detach_face(face_id: int) -> Any:
         """Remove one face from its cluster or person - the 'that isn't them'
@@ -451,8 +524,9 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/duplicates")
-    def api_duplicates(near: bool = False, distance: int = 6) -> Any:
-        from pa.cli import _near_duplicates
+    def api_duplicates(near: bool = False, distance: int = 6,
+                       raw_pairs: bool = False) -> Any:
+        from pa.duplicates import near_duplicates
         conn = db()
         exact = [dict(r) for r in conn.execute(
             """SELECT p.id, p.blake3, p.bytes, COUNT(f.id) n,
@@ -463,7 +537,10 @@ def create_app() -> FastAPI:
         wasted = sum((r["bytes"] or 0) * (r["n"] - 1) for r in exact)
         out: dict[str, Any] = {"exact": exact, "wasted_bytes": wasted, "near": []}
         if near:
-            groups = _near_duplicates(conn, distance)[:100]
+            groups, pairs = near_duplicates(conn, distance,
+                                            include_format_pairs=raw_pairs)
+            out["format_pairs_skipped"] = pairs
+            groups = groups[:100]
             for g in groups:
                 marks = ",".join("?" * len(g["ids"]))
                 g["photos"] = [dict(r) for r in conn.execute(

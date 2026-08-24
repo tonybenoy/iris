@@ -180,10 +180,13 @@ def run_faces(conn: sqlite3.Connection, cfg, analyzer, limit: int = 2000,
             try:
                 faces = analyzer.detect(src.read_bytes())
                 with transaction(conn):
-                    # Drop only this model's unconfirmed detections; a face the
-                    # user has named survives a re-run of the stage.
+                    # Drop only this model's undecided detections. A face the
+                    # user has named survives a re-run of the stage, and so does
+                    # one they ignored -- otherwise re-running faces would
+                    # resurrect every stranger they had already dismissed.
                     conn.execute(
-                        "DELETE FROM face WHERE photo_id=? AND confirmed=0 AND model=?",
+                        "DELETE FROM face WHERE photo_id=? AND confirmed=0 "
+                        "AND rejected=0 AND model=?",
                         (photo_id, version))
                     for face in faces:
                         x, y, w, h = face.bbox

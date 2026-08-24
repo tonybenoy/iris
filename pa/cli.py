@@ -383,6 +383,9 @@ def sidecar_import(
 def duplicates(
     near: bool = typer.Option(False, "--near", help="Also find visually similar photos."),
     distance: int = typer.Option(6, "--distance", help="pHash bits for --near (0-64)."),
+    raw_pairs: bool = typer.Option(
+        False, "--raw-pairs",
+        help="Include RAW+JPEG pairs, which are skipped by default."),
 ) -> None:
     """Photos stored more than once, and optionally near-identical shots."""
     conn, _ = _db()
@@ -405,7 +408,8 @@ def duplicates(
         console.print("[green]no identical duplicates[/]")
 
     if near:
-        groups = _near_duplicates(conn, distance)
+        from pa.duplicates import near_duplicates
+        groups, pairs = near_duplicates(conn, distance, include_format_pairs=raw_pairs)
         if groups:
             t = Table("photos", "example", title=f"Visually similar (within {distance} bits)")
             for g in groups[:25]:
@@ -414,6 +418,9 @@ def duplicates(
             console.print(f"[bold]{len(groups)}[/] groups of near-identical photos")
         else:
             console.print("[green]no near-duplicates[/]")
+        if pairs:
+            console.print(f"[dim]ignored {pairs} RAW+JPEG pairs - the same shot in two "
+                          f"formats, not waste. Use --raw-pairs to list them.[/]")
     conn.close()
 
 
@@ -426,39 +433,6 @@ def _human(n: int | None) -> str:
         n /= 1024
     return str(n)
 
-
-def _near_duplicates(conn, max_distance: int) -> list[dict]:
-    """Group photos whose perceptual hashes are within `max_distance` bits.
-
-    Brute-force pairwise, but only over photos that HAVE a pHash and using
-    numpy popcount over a packed array, so 500k photos is one vectorised pass
-    rather than 125 billion Python-level comparisons.
-    """
-    import numpy as np
-
-    rows = conn.execute(
-        """SELECT p.id, p.phash, (SELECT filename FROM file f WHERE f.photo_id=p.id LIMIT 1) fn
-           FROM photo p WHERE p.phash IS NOT NULL""").fetchall()
-    if len(rows) < 2:
-        return []
-    ids = np.array([r["id"] for r in rows], dtype=np.int64)
-    names = {r["id"]: r["fn"] for r in rows}
-    hashes = np.array([r["phash"] & 0xFFFFFFFFFFFFFFFF for r in rows], dtype=np.uint64)
-    packed = hashes.view(np.uint8).reshape(len(hashes), 8)
-
-    seen: set[int] = set()
-    groups: list[dict] = []
-    for i in range(len(ids)):
-        if int(ids[i]) in seen:
-            continue
-        dist = np.unpackbits(packed[i] ^ packed, axis=1).sum(axis=1)
-        hit = np.where(dist <= max_distance)[0]
-        if len(hit) < 2:
-            continue
-        members = [int(ids[j]) for j in hit]
-        seen.update(members)
-        groups.append({"ids": members, "example": names.get(members[0]) or str(members[0])})
-    return groups
 
 
 config_app = typer.Typer(no_args_is_help=True, help="Settings: models, devices, thresholds.")
