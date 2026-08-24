@@ -16,6 +16,24 @@ from pa.providers.base import ImageEmbedder, TextEmbedder
 from pa.providers.registry import register
 
 
+def _from_cache_first(loader, model_id: str, **kwargs):
+    """Load from the local cache without contacting the Hub, downloading only
+    if it is genuinely not there yet.
+
+    transformers otherwise revalidates against huggingface.co on every single
+    load. The weights are not re-downloaded -- they are cached and reused -- but
+    each start pays a network round-trip, prints an unauthenticated-requests
+    warning, and fails outright with no internet. For a tool whose whole promise
+    is that nothing leaves the machine, reaching for the network to load a model
+    it already has is the wrong default.
+    """
+    try:
+        return loader.from_pretrained(model_id, local_files_only=True, **kwargs)
+    except Exception:
+        # Not cached yet (or the cache is incomplete): fetch it, once.
+        return loader.from_pretrained(model_id, **kwargs)
+
+
 @register("image_embed", "siglip")
 @register("text_embed", "siglip")
 class SiglipEmbedder(ImageEmbedder, TextEmbedder):
@@ -43,9 +61,9 @@ class SiglipEmbedder(ImageEmbedder, TextEmbedder):
             # fp16 halves VRAM and is faster; the retrieval quality difference is
             # not measurable, and this GPU is shared with the captioner.
             dtype = torch.float16 if device == "cuda" else torch.float32
-            self._model = AutoModel.from_pretrained(
-                self.cfg.model, dtype=dtype).to(device).eval()
-            self._processor = AutoProcessor.from_pretrained(self.cfg.model)
+            self._model = _from_cache_first(
+                AutoModel, self.cfg.model, dtype=dtype).to(device).eval()
+            self._processor = _from_cache_first(AutoProcessor, self.cfg.model)
 
     @property
     def model_version(self) -> str:

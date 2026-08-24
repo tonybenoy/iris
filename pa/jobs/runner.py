@@ -100,13 +100,18 @@ class PipelineRunner:
         self._providers.clear()
 
     # --------------------------------------------------------------- internals
-    def _provider(self, kind: str, cfg):
-        """Cache loaded models across runs, keyed on the settings that define them.
+    def provider(self, kind: str, cfg):
+        """The one loaded instance of a model, keyed on the settings that define it.
 
-        Loading SigLIP is ~10s of weight shuffling. Doing that on every press of
-        a button in the UI would make the whole feature feel broken, so a run
-        reuses the model the last one loaded -- unless the settings that decide
+        Loading SigLIP is seconds of weight shuffling and over a gigabyte of
+        VRAM. Doing that per button press would make the UI feel broken, so a
+        run reuses what the last one loaded -- unless the settings that decide
         *which* model it is have changed underneath it.
+
+        Search shares this cache too, rather than keeping its own embedder. They
+        are the same weights for the same purpose, and holding two copies meant
+        a second "Loading weights" bar and double the VRAM the moment anyone
+        pressed Index after a search had warmed up.
         """
         from pa.providers.registry import (
             get_captioner,
@@ -176,7 +181,7 @@ class PipelineRunner:
             return
 
         if stage == "embed":
-            res = worker.run_embed(conn, cfg, self._provider("embed", cfg), limit, cb)
+            res = worker.run_embed(conn, cfg, self.provider("embed", cfg), limit, cb)
             self._record(stage, res)
             if res.done:
                 # Search reads a prebuilt index file, not the embedding rows, so
@@ -186,12 +191,12 @@ class PipelineRunner:
             return
 
         if stage == "faces":
-            self._record(stage, worker.run_faces(conn, cfg, self._provider("faces", cfg),
+            self._record(stage, worker.run_faces(conn, cfg, self.provider("faces", cfg),
                                                  limit, cb))
             return
 
         if stage == "caption":
-            provider = self._provider("caption", cfg)
+            provider = self.provider("caption", cfg)
             ok, msg = provider.health()
             if not ok:
                 # A dead model server is a setup problem, not a per-photo failure.

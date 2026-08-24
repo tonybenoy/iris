@@ -25,6 +25,22 @@ from pa.search.query import search as run_search
 WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
 
+def _model_cache_dir() -> str:
+    """Where the downloaded model weights actually sit.
+
+    Not under this app's cache directory: transformers and insightface keep
+    their own, shared with every other tool on the machine, and pointing them
+    somewhere private would mean downloading several gigabytes again for no
+    gain. Worth reporting, since "why is it downloading" is otherwise
+    unanswerable from inside the app.
+    """
+    try:
+        from huggingface_hub import constants
+        return str(constants.HF_HUB_CACHE)
+    except Exception:
+        return "(transformers not installed)"
+
+
 # These MUST live at module scope. This file uses `from __future__ import
 # annotations`, so every annotation is a string that FastAPI resolves against
 # the module's globals. A model defined inside create_app() is invisible there,
@@ -127,8 +143,10 @@ def create_app() -> FastAPI:
             if index.count() == 0:
                 app.state.index = False
                 return None
-            from pa.providers.registry import get_image_embedder
-            app.state.index = (index, get_image_embedder(cfg))
+            # Shared with the indexer rather than loaded separately: same model,
+            # same settings, and two copies is a wasted gigabyte of VRAM plus a
+            # second wait for weights that were already in memory.
+            app.state.index = (index, runner.provider("embed", cfg))
         index, embedder = app.state.index
 
         def go(text: str, limit: int) -> list[int]:
@@ -856,6 +874,7 @@ def create_app() -> FastAPI:
             "reindex_required": REINDEX_REQUIRED,
             "stages": list(repo.STAGES),
             "paths": {"data": str(cfg.paths.data_dir), "cache": str(cfg.paths.cache_dir),
+                      "models": _model_cache_dir(),
                       "database": str(cfg.paths.db_path),
                       "thumbnails": str(cfg.paths.thumbs_dir),
                       "vectors": str(cfg.paths.vectors_dir),
