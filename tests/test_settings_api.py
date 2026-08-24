@@ -372,3 +372,69 @@ def test_the_status_says_a_model_is_loading(cfg, monkeypatch):
     release.set()
     got.join(5)
     assert runner.status()["phase"] == "working"
+
+
+def test_two_callers_do_not_each_load_their_own_model(cfg, monkeypatch):
+    """Opening the app runs a search, which loads the embedder in a request
+    thread. Pressing Index a moment later found the cache still empty and
+    started a second copy: double the VRAM and two CUDA initialisations at
+    once, which on a card with no room for the second looks like a hang."""
+    import threading
+
+    import pa.providers.registry as registry
+    from pa.jobs.runner import PipelineRunner
+
+    loads = []
+    started, release = threading.Event(), threading.Event()
+
+    def slow_load(_cfg):
+        loads.append(1)
+        started.set()
+        release.wait(5)
+        return object()
+
+    monkeypatch.setattr(registry, "get_image_embedder", slow_load)
+    runner = PipelineRunner()
+
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(runner.provider("embed", cfg)),
+                                daemon=True) for _ in range(2)]
+    threads[0].start()
+    assert started.wait(5)      # the first is inside the load
+    threads[1].start()          # the second arrives while it is still going
+    release.set()
+    for t in threads:
+        t.join(5)
+
+    assert len(loads) == 1, "the model was loaded twice"
+    assert got[0] is got[1], "and the two callers got different instances"
+
+
+def test_detecting_faces_always_regroups_them(cfg, monkeypatch):
+    """A face with no group belongs to nobody and cannot be named, so a run that
+    detects faces without clustering leaves the People screen empty with no sign
+    of why. A full run always ended with cluster; a run of one stage did not,
+    which made redoing faces alone look like it had lost every face."""
+    from pa.jobs.runner import PipelineRunner
+
+    ran = []
+    monkeypatch.setattr(PipelineRunner, "_run_stage",
+                        lambda self, conn, cfg, stage, limit: ran.append(stage))
+    runner = PipelineRunner()
+    state = runner.start(cfg, ["faces"])
+    assert state["stages"] == ["faces", "cluster"]
+
+    runner._thread.join(10)
+    assert ran == ["faces", "cluster"]
+
+
+def test_asking_for_clustering_twice_does_not_run_it_twice(cfg, monkeypatch):
+    from pa.jobs.runner import PipelineRunner
+
+    ran = []
+    monkeypatch.setattr(PipelineRunner, "_run_stage",
+                        lambda self, conn, cfg, stage, limit: ran.append(stage))
+    runner = PipelineRunner()
+    runner.start(cfg, ["faces", "cluster"])
+    runner._thread.join(10)
+    assert ran == ["faces", "cluster"]

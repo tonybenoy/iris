@@ -43,6 +43,10 @@ class PipelineRunner:
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self._providers: dict[str, Any] = {}
+        # One lock per kind of model. Searching loads the embedder in a request
+        # thread while the indexer loads it in its own, and whoever arrives
+        # second must wait rather than start a second copy.
+        self._loading: dict[str, threading.Lock] = {}
         self._state: dict[str, Any] = {
             "running": False, "stage": None, "stages": [], "queued": [],
             "progress": {"done": 0, "failed": 0, "skipped": 0},
@@ -73,6 +77,14 @@ class PipelineRunner:
             raise ValueError(f"unknown stage(s) {unknown}; expected any of {list(STAGES)}")
         if not wanted:
             raise ValueError("no stages given")
+        # Detecting faces without grouping them leaves the People screen empty:
+        # every face is found and none belongs to anybody, so there is nothing
+        # to name and no sign of why. Running faces has always implied this --
+        # a full run ends with cluster -- but a run of one stage did not, which
+        # made redoing faces alone look like it had lost every face in the
+        # library.
+        if "faces" in wanted and "cluster" not in wanted:
+            wanted.append("cluster")
 
         with self._lock:
             if self._state["running"]:
@@ -129,26 +141,44 @@ class PipelineRunner:
         cached = self._providers.get(kind)
         if cached and cached[0] == key:
             return cached[1]
-        # Say so, in the terminal and in the UI. The first load of an 800M
-        # parameter model is a minute of complete silence, and silence is
-        # indistinguishable from a hang -- the more so because transformers
-        # prints its own progress bar and then stops, which reads as the point
-        # where it got stuck rather than the point where it finished.
-        device = getattr(section, "device", "") or ""
-        self._say(f"loading the {kind} model {section.model}"
-                  f"{f' on {device}' if device else ''}")
-        self._state["phase"] = "loading"
-        self._state["note"] = f"Loading {section.model}"
-        began = time.monotonic()
-        try:
-            built = {"embed": get_image_embedder, "faces": get_face_analyzer,
-                     "caption": get_captioner}[kind](cfg)
-        finally:
-            self._state["phase"] = "working"
-            self._state["note"] = None
-        self._say(f"{kind} model ready in {time.monotonic() - began:.0f}s")
-        self._providers[kind] = (key, built)
-        return built
+
+        # Under the lock, and checked again inside it. Opening the app runs a
+        # search, which loads the embedder in a request thread; pressing Index a
+        # moment later has the run thread find the cache still empty and start
+        # its own. Two copies of an 800M parameter model is double the VRAM, two
+        # CUDA initialisations at once, and on a card with no room for the
+        # second, a failure that looks like the first one hanging.
+        with self._loading.setdefault(kind, threading.Lock()):
+            cached = self._providers.get(kind)
+            if cached and cached[0] == key:
+                return cached[1]   # whoever we waited for has just loaded it
+
+            # Say so, in the terminal and in the UI. The first load is a minute
+            # of complete silence, and silence is indistinguishable from a hang
+            # -- the more so because transformers prints its own progress bar
+            # and then stops, which reads as the point where it got stuck
+            # rather than the point where it finished.
+            device = getattr(section, "device", "") or ""
+            self._say(f"loading the {kind} model {section.model}"
+                      f"{f' on {device}' if device else ''}")
+            self._phase("loading", f"Loading {section.model}")
+            began = time.monotonic()
+            try:
+                built = {"embed": get_image_embedder, "faces": get_face_analyzer,
+                         "caption": get_captioner}[kind](cfg)
+            finally:
+                self._phase("working", None)
+            self._say(f"{kind} model ready in {time.monotonic() - began:.0f}s")
+            self._providers[kind] = (key, built)
+            return built
+
+    def _phase(self, phase: str, note: str | None) -> None:
+        """Record what a *run* is doing. Loading a model also happens for a
+        search, in a request thread, and an idle runner claiming to be working
+        would be a plain lie to anything reading the status."""
+        if self._state["running"]:
+            self._state["phase"] = phase
+            self._state["note"] = note
 
     @staticmethod
     def _say(message: str) -> None:
