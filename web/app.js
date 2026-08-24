@@ -3,7 +3,16 @@
 const $ = (s, r = document) => r.querySelector(s);
 const api = async (u, o) => {
   const r = await fetch(u, o);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail;
+    // Some conflicts carry a way forward (a person to merge into), so keep the
+    // whole payload on the error rather than flattening it to a string.
+    const err = new Error(
+      (typeof detail === 'string' ? detail : detail?.message) || r.statusText);
+    err.status = r.status;
+    err.detail = detail;
+    throw err;
+  }
   return r.json();
 };
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c =>
@@ -443,6 +452,7 @@ async function loadPeople() {
        <button class="crop go">${p.cover_face ? `<img src="/api/face/${p.cover_face}" alt="">` : ''}</button>
        <b>${esc(p.name)}</b><span>${p.n} photo${p.n === 1 ? '' : 's'}</span>
        <button class="edit">rename</button>
+       <button class="edit mergeinto">merge into…</button>
      </div>`).join('') || '<p style="color:var(--faint)">Nobody named yet.</p>';
 
   $('#named').querySelectorAll('.person .go').forEach(b => b.addEventListener('click', () => {
@@ -458,13 +468,43 @@ async function loadPeople() {
       if (!confirm(`Un-name ${card.dataset.name}? Their faces go back to the naming queue.`)) return;
       await api(`/api/people/${card.dataset.id}`, { method: 'DELETE' });
     } else {
-      await api(`/api/people/${card.dataset.id}`, {
-        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim() })
-      }).catch(e => alert(e.message));
+      try {
+        await api(`/api/people/${card.dataset.id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() })
+        });
+      } catch (e) {
+        // "That name is taken" nearly always means "these two are the same
+        // person", so offer the merge instead of just refusing.
+        if (e.detail?.merge_into && confirm(
+              `${e.detail.message}\n\n${card.dataset.name}'s photos move across ` +
+              `and "${card.dataset.name}" goes away.`)) {
+          await api(`/api/people/${card.dataset.id}/merge?into=${e.detail.merge_into}`,
+                    { method: 'POST' }).catch(err => alert(err.message));
+        } else if (!e.detail?.merge_into) {
+          alert(e.message);
+        }
+      }
     }
     loadPeople();
   }));
+
+  $('#named').querySelectorAll('.person .mergeinto').forEach(b =>
+    b.addEventListener('click', async () => {
+      const card = b.closest('.person');
+      const others = pe.people.filter(p => p.name && String(p.id) !== card.dataset.id);
+      if (!others.length) { alert('There is nobody else named yet.'); return; }
+      const who = prompt(
+        `Merge ${card.dataset.name} into which person?\n\n` +
+        `Their photos move across and "${card.dataset.name}" goes away.\n\n` +
+        others.map(p => p.name).join('\n'), others[0].name);
+      if (who === null) return;
+      const target = others.find(p => p.name.toLowerCase() === who.trim().toLowerCase());
+      if (!target) { alert(`Nobody is called "${who.trim()}".`); return; }
+      await api(`/api/people/${card.dataset.id}/merge?into=${target.id}`, { method: 'POST' })
+        .catch(e => alert(e.message));
+      loadPeople();
+    }));
 
   $('#unnamed-h').hidden = cl.clusters.length === 0;
   $('#clusters').innerHTML = cl.clusters.map(c =>
@@ -477,8 +517,15 @@ async function loadPeople() {
        <div class="n">${c.count} face${c.count === 1 ? '' : 's'}</div>
        <div class="faces">${c.faces.slice(0, 5).map(f =>
          `<div><img src="/api/face/${f.id}" alt=""></div>`).join('')}</div>
-       <form><input placeholder="Who is this?" aria-label="Name this person"><button>Name</button></form>
+       <form><input placeholder="Who is this?" aria-label="Name this person"
+                    list="known-people" autocomplete="off"><button>Name</button></form>
      </div>`).join('');
+
+  // Typing a name that already exists attaches the group to that person rather
+  // than making a second one, so offering the existing names IS "merge with
+  // someone already named".
+  $('#known-people').innerHTML = pe.people.filter(p => p.name)
+    .map(p => `<option value="${esc(p.name)}">`).join('');
   refreshMergeBar();
 
   // Group photos are mostly strangers. Without this the queue never empties,

@@ -181,3 +181,44 @@ def test_an_existing_library_upgrades_without_losing_anything(tmp_path):
     assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT blake3 FROM photo WHERE id=1").fetchone()[0] == "keepme"
     assert "ignored_as" in [r[1] for r in conn.execute("PRAGMA table_info(face)")]
+
+
+# ------------------------------------------------------- merging named people
+def test_naming_a_group_with_an_existing_name_joins_that_person(client):
+    """The common correction: two groups are the same person already named."""
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+    client.post("/api/clusters/9/name", json={"name": "Sarah"})
+    people = client.get("/api/people").json()["people"]
+    assert len(people) == 1, "one name must mean one person, not two rows"
+    assert people[0]["n"] == 3
+
+
+def test_merging_two_named_people(client):
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+    client.post("/api/clusters/9/name", json={"name": "Sarah B"})
+    ids = {p["name"]: p["id"] for p in client.get("/api/people").json()["people"]}
+
+    r = client.post(f"/api/people/{ids['Sarah B']}/merge?into={ids['Sarah']}")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "moved": 1, "name": "Sarah"}
+
+    people = client.get("/api/people").json()["people"]
+    assert [(p["name"], p["n"]) for p in people] == [("Sarah", 3)]
+
+
+def test_renaming_onto_a_taken_name_offers_the_merge(client):
+    """Refusing with a bare conflict left no way to fix a split person."""
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+    client.post("/api/clusters/9/name", json={"name": "Sarah B"})
+    ids = {p["name"]: p["id"] for p in client.get("/api/people").json()["people"]}
+
+    r = client.patch(f"/api/people/{ids['Sarah B']}", json={"name": "Sarah"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["merge_into"] == ids["Sarah"]
+
+
+def test_a_person_cannot_be_merged_into_themselves(client):
+    client.post("/api/clusters/7/name", json={"name": "Sarah"})
+    pid = client.get("/api/people").json()["people"][0]["id"]
+    assert client.post(f"/api/people/{pid}/merge?into={pid}").status_code == 400
+    assert client.post(f"/api/people/{pid}/merge?into=9999").status_code == 404

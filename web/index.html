@@ -65,6 +65,10 @@
       <p>Name a group once. New photos of that person are matched automatically.</p>
     </div>
     <div id="named" class="facerow"></div>
+    <!-- Existing names, offered while naming a group. Picking one attaches the
+         group to that person instead of creating a second one under a near
+         duplicate of the same name. -->
+    <datalist id="known-people"></datalist>
 
     <h3 class="sub" id="unnamed-h" hidden>Waiting for a name</h3>
     <!-- Lives in the markup, bound once. It used to be created inside the
@@ -72,7 +76,8 @@
          the earlier ones in the document with duplicate ids. -->
     <div class="mergebar" id="mergebar" hidden>
       <span id="mergecount"></span>
-      <input id="mergename" placeholder="Name them (optional)" aria-label="Name for merged person">
+      <input id="mergename" placeholder="Name them, new or existing (optional)"
+             aria-label="Name for merged person" list="known-people" autocomplete="off">
       <button id="mergego">Merge</button>
       <button id="mergeignore" class="ghost">Ignore these</button>
       <button class="ghost" id="mergecancel">Cancel</button>

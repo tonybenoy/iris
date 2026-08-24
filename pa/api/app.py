@@ -511,12 +511,48 @@ def create_app() -> FastAPI:
         conn.commit()
         return {"ok": True}
 
+    @app.post("/api/people/{person_id}/merge")
+    def api_merge_people(person_id: int, into: int) -> Any:
+        """Fold one named person into another.
+
+        Clustering splits a person across groups, and naming those groups
+        separately -- "Sarah" and "Sarah B" -- is easy to do before you realise
+        they are the same. Without this the only way back was to un-name one and
+        re-name every face by hand.
+        """
+        if person_id == into:
+            raise HTTPException(400, "that is the same person")
+        conn = db()
+        rows = conn.execute("SELECT id, name FROM person WHERE id IN (?,?)",
+                            (person_id, into)).fetchall()
+        if len(rows) != 2:
+            raise HTTPException(404, "no such person")
+        photos = [r["photo_id"] for r in conn.execute(
+            "SELECT DISTINCT photo_id FROM face WHERE person_id=?", (person_id,))]
+        moved = conn.execute("UPDATE face SET person_id=? WHERE person_id=?",
+                             (into, person_id)).rowcount
+        conn.execute("DELETE FROM person WHERE id=?", (person_id,))
+        for pid in photos:
+            repo.reindex_fts(conn, pid)
+        conn.commit()
+        kept = next(r["name"] for r in rows if r["id"] == into)
+        return {"ok": True, "moved": moved, "name": kept}
+
     @app.patch("/api/people/{person_id}")
     def api_rename_person(person_id: int, body: NameIn) -> Any:
         conn = db()
         name = body.name.strip()
         if not name:
             raise HTTPException(400, "name cannot be empty")
+        # Renaming onto a name that already exists almost always means "these
+        # two are the same person". Say so, and hand back the id to merge into,
+        # rather than refusing with a bare conflict and no way forward.
+        other = conn.execute("SELECT id FROM person WHERE name=? AND id<>?",
+                             (name, person_id)).fetchone()
+        if other:
+            raise HTTPException(409, {
+                "message": f"{name} already exists. Merge them together?",
+                "merge_into": other["id"], "name": name})
         try:
             conn.execute("UPDATE person SET name=? WHERE id=?", (name, person_id))
         except sqlite3.IntegrityError:
