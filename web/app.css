@@ -305,11 +305,18 @@ button.danger:hover{color:var(--lex);border-color:var(--lex)}
   padding:16px 20px;border-bottom:1px solid var(--line)}
 .modal-hd h3{font-size:16px}
 .modal-hd button{font-size:24px;color:var(--faint);line-height:1}
-.crumbs{padding:11px 20px;border-bottom:1px solid var(--line);
-  font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);
-  overflow-x:auto;white-space:nowrap}
+/* Up sits outside the scrolling crumbs: a long path scrolls sideways, and the
+   way back must not scroll off with it. */
+.crumbrow{display:flex;align-items:center;gap:12px;padding:11px 20px;
+  border-bottom:1px solid var(--line);min-width:0}
+#picker-up{flex:none;font-family:"JetBrains Mono",monospace;font-size:11.5px;
+  color:var(--dim);border:1px solid var(--line);border-radius:6px;padding:4px 9px}
+#picker-up:hover{color:var(--text);border-color:var(--dim)}
+.crumbs{flex:1;min-width:0;font-family:"JetBrains Mono",monospace;font-size:11.5px;
+  color:var(--dim);overflow-x:auto;white-space:nowrap}
 .crumbs button{color:var(--dim);text-decoration:underline;text-underline-offset:3px}
 .crumbs button:hover{color:var(--lex)}
+.crumbs .sep{padding:0 5px;color:var(--faint)}
 .picker-body{display:grid;grid-template-columns:186px 1fr;min-height:0;flex:1}
 .places{border-right:1px solid var(--line);padding:11px;overflow-y:auto}
 .places button{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:6px;

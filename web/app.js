@@ -439,7 +439,16 @@ $('.lb-nav.prev').addEventListener('click', () => step(-1));
 $('.lb-nav.next').addEventListener('click', () => step(1));
 
 addEventListener('keydown', e => {
-  if (!$('#picker').hidden && e.key === 'Escape') { closePicker(); return; }
+  if (!$('#picker').hidden) {
+    if (e.key === 'Escape') { closePicker(); return; }
+    // Backspace is what a file manager does, but not while someone is typing
+    // a label into the box at the bottom of the same dialog.
+    if (e.key === 'Backspace' && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)) {
+      e.preventDefault();
+      goUp();
+    }
+    return;
+  }
   if (!$('#lightbox').hidden) {
     if (e.key === 'Escape') closeLb();
     if (e.key === 'ArrowLeft') step(-1);
@@ -919,7 +928,33 @@ async function loadLibraryCounts() {
 }
 
 /* ------------------------------------------------------------ folder picker */
-const picker = { path: null, selected: null };
+const picker = { path: null, parent: null, selected: null };
+
+/* Paths come back in the server's own spelling, which is C:\\Users\\you on
+   Windows. Splitting those on "/" alone produced one crumb holding the entire
+   path and a "/" button that means nothing there, so the only way through the
+   picker was downwards. */
+function crumbsFor(path) {
+  const sep = path.includes('\\') ? '\\' : '/';
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  const unc = sep === '\\' && path.startsWith('\\\\');
+  const out = [];
+  let at = '';
+  if (sep === '/') {
+    out.push({ label: '/', path: '/' });
+  }
+  parts.forEach((seg, i) => {
+    if (sep === '\\' && i === 0) {
+      // A bare "C:" is not a folder: the path that means the drive is "C:\".
+      at = unc ? `\\\\${seg}` : seg;
+      out.push({ label: seg, path: unc ? at : seg + sep });
+      return;
+    }
+    at += sep + seg;
+    out.push({ label: seg, path: at });
+  });
+  return out;
+}
 
 async function openPicker(path) {
   $('#picker').hidden = false;
@@ -944,17 +979,20 @@ async function showDir(path) {
   picker.path = d.path;
   select(d.path, d.photos_here);
 
+
   $('#shortcuts').innerHTML = d.shortcuts.map(s =>
     `<button data-path="${esc(s.path)}">${esc(s.label)}</button>`).join('');
   $('#shortcuts').querySelectorAll('button').forEach(b =>
     b.addEventListener('click', () => showDir(b.dataset.path)));
 
-  const parts = d.path.split('/').filter(Boolean);
-  $('#crumbs').innerHTML =
-    `<button data-path="/">/</button>` +
-    parts.map((seg, i) =>
-      ` <button data-path="${esc('/' + parts.slice(0, i + 1).join('/'))}">${esc(seg)}</button>`)
-      .join(' /');
+  // The server says where the parent is; working it out from the path here
+  // would just be the same separator guessing again.
+  picker.parent = d.parent;
+  $('#picker-up').hidden = !d.parent;
+
+  $('#crumbs').innerHTML = crumbsFor(d.path)
+    .map(c => `<button data-path="${esc(c.path)}">${esc(c.label)}</button>`)
+    .join('<span class="sep">/</span>');
   $('#crumbs').querySelectorAll('button').forEach(b =>
     b.addEventListener('click', () => showDir(b.dataset.path)));
 
@@ -994,6 +1032,8 @@ function select(path, photos) {
 
 $('#addroot').addEventListener('click', () => openPicker(picker.path));
 $('#picker-close').addEventListener('click', closePicker);
+const goUp = () => { if (picker.parent) showDir(picker.parent); };
+$('#picker-up').addEventListener('click', goUp);
 $('#picker').addEventListener('click', (e) => { if (e.target.id === 'picker') closePicker(); });
 $('#picker-add').addEventListener('click', async () => {
   if (!picker.selected) return;

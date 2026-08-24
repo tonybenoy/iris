@@ -109,3 +109,30 @@ def test_mount_points_with_spaces(monkeypatch, mountpoint):
         lambda self, *a, **k: f"/dev/sdb1 {escaped} ext4 rw 0 0\n")
     got = [m.mountpoint for m in volumes._mounts()]
     assert Path(mountpoint) in got
+
+
+# --------------------------------------------------------- browsing upwards
+def test_the_picker_can_always_walk_back_up(tmp_path):
+    """The picker had no way out of a folder but the breadcrumb, which was built
+    by splitting the path on "/" -- so on Windows, where the server spells paths
+    with backslashes, it produced one crumb holding the whole path and browsing
+    only ever went downwards."""
+    from pa.api.roots import browse
+
+    deep = tmp_path / "photos" / "2024" / "summer"
+    deep.mkdir(parents=True)
+
+    seen = []
+    at = str(deep)
+    for _ in range(20):
+        listing = browse(at)
+        seen.append(listing.path)
+        if listing.parent is None:
+            break
+        # Whatever it names as the parent has to be somewhere we can browse to.
+        assert browse(listing.parent).path == listing.parent
+        at = listing.parent
+
+    assert seen[0] == str(deep)
+    assert str(tmp_path / "photos") in seen
+    assert browse(seen[-1]).parent is None, "walking up must end at a root, not loop"
